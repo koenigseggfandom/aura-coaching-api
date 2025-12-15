@@ -1,79 +1,222 @@
 const express = require('express');
 const cors = require('cors');
-const app = express();
+const fs = require('fs').promises;
+const path = require('path');
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Basit database (RAM'de)
-let database = {
+// Veri dosyası yolu
+const DATA_FILE = path.join(__dirname, 'data.json');
+
+// Başlangıç verisi
+const initialData = {
   applications: [],
   students: [],
   lessons: []
 };
 
-// Test endpoint
+// Veri dosyasını başlat
+async function initDataFile() {
+  try {
+    await fs.access(DATA_FILE);
+  } catch {
+    await fs.writeFile(DATA_FILE, JSON.stringify(initialData, null, 2));
+  }
+}
+
+// Veriyi oku
+async function readData() {
+  try {
+    const data = await fs.readFile(DATA_FILE, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('Veri okuma hatası:', error);
+    return initialData;
+  }
+}
+
+// Veriyi yaz
+async function writeData(data) {
+  try {
+    await fs.writeFile(DATA_FILE, JSON.stringify(data, null, 2));
+    return true;
+  } catch (error) {
+    console.error('Veri yazma hatası:', error);
+    return false;
+  }
+}
+
+// Health check
 app.get('/', (req, res) => {
-  res.json({ message: 'AURA Coaching API ÇALIŞIYOR!', status: 'OK' });
+  res.json({ 
+    status: 'AURA Coaching API çalışıyor!',
+    timestamp: new Date().toISOString()
+  });
 });
 
-// APPLICATIONS
-app.get('/applications', (req, res) => {
-  res.json(database.applications);
+// ============ BAŞVURULAR ============
+
+// Tüm başvuruları getir
+app.get('/api/applications', async (req, res) => {
+  try {
+    const data = await readData();
+    res.json({ success: true, applications: data.applications });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-app.post('/applications', (req, res) => {
-  const newApp = {
-    id: Date.now(),
-    ...req.body,
-    created_at: new Date().toISOString()
-  };
-  database.applications.push(newApp);
-  res.json(newApp);
+// Yeni başvuru ekle (index.html'den gelecek)
+app.post('/api/applications', async (req, res) => {
+  try {
+    const data = await readData();
+    const newApplication = {
+      id: Date.now(),
+      ...req.body,
+      date: new Date().toISOString()
+    };
+    
+    data.applications.push(newApplication);
+    await writeData(data);
+    
+    res.json({ success: true, application: newApplication });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-app.delete('/applications/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  database.applications = database.applications.filter(app => app.id !== id);
-  res.json({ success: true });
+// Başvuru sil
+app.delete('/api/applications/:id', async (req, res) => {
+  try {
+    const data = await readData();
+    const id = parseInt(req.params.id);
+    
+    data.applications = data.applications.filter(app => app.id !== id);
+    await writeData(data);
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-// STUDENTS
-app.get('/students', (req, res) => {
-  res.json(database.students);
+// ============ ÖĞRENCİLER ============
+
+// Tüm öğrencileri getir
+app.get('/api/students', async (req, res) => {
+  try {
+    const data = await readData();
+    res.json({ success: true, students: data.students });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-app.post('/students', (req, res) => {
-  const newStudent = {
-    id: Date.now(),
-    ...req.body,
-    registration_date: new Date().toISOString()
-  };
-  database.students.push(newStudent);
-  res.json(newStudent);
+// Yeni öğrenci ekle
+app.post('/api/students', async (req, res) => {
+  try {
+    const data = await readData();
+    const newStudent = {
+      id: Date.now(),
+      ...req.body,
+      registrationDate: new Date().toISOString()
+    };
+    
+    data.students.push(newStudent);
+    await writeData(data);
+    
+    res.json({ success: true, student: newStudent });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-// LESSONS
-app.get('/lessons', (req, res) => {
-  res.json(database.lessons);
+// Öğrenci güncelle
+app.put('/api/students/:id', async (req, res) => {
+  try {
+    const data = await readData();
+    const id = parseInt(req.params.id);
+    
+    const index = data.students.findIndex(s => s.id === id);
+    if (index !== -1) {
+      data.students[index] = { ...data.students[index], ...req.body };
+      await writeData(data);
+      res.json({ success: true, student: data.students[index] });
+    } else {
+      res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-app.post('/lessons', (req, res) => {
-  const newLesson = {
-    id: Date.now(),
-    ...req.body,
-    created_at: new Date().toISOString()
-  };
-  database.lessons.push(newLesson);
-  res.json(newLesson);
+// Öğrenci sil
+app.delete('/api/students/:id', async (req, res) => {
+  try {
+    const data = await readData();
+    const id = parseInt(req.params.id);
+    
+    data.students = data.students.filter(s => s.id !== id);
+    await writeData(data);
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ API ${PORT} portunda çalışıyor!`);
-  console.log(`✅ Endpoints:`);
-  console.log(`   GET  /applications`);
-  console.log(`   POST /applications`);
-  console.log(`   GET  /students`);
-  console.log(`   POST /students`);
+// ============ DERSLER ============
+
+// Tüm dersleri getir
+app.get('/api/lessons', async (req, res) => {
+  try {
+    const data = await readData();
+    res.json({ success: true, lessons: data.lessons });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Yeni ders ekle
+app.post('/api/lessons', async (req, res) => {
+  try {
+    const data = await readData();
+    const newLesson = {
+      id: Date.now(),
+      ...req.body
+    };
+    
+    data.lessons.push(newLesson);
+    await writeData(data);
+    
+    res.json({ success: true, lesson: newLesson });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Ders sil
+app.delete('/api/lessons/:id', async (req, res) => {
+  try {
+    const data = await readData();
+    const id = parseInt(req.params.id);
+    
+    data.lessons = data.lessons.filter(l => l.id !== id);
+    await writeData(data);
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Server başlat
+app.listen(PORT, async () => {
+  await initDataFile();
+  console.log(`🚀 AURA Coaching API ${PORT} portunda çalışıyor!`);
 });
