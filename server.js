@@ -1,10 +1,25 @@
 const express = require('express');
 const cors = require('cors');
+const mongoose = require('mongoose');
 const fs = require('fs').promises;
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// MongoDB bağlantısı
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/aura_coaching';
+
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+
+const db = mongoose.connection;
+db.on('error', console.error.bind(console, 'MongoDB bağlantı hatası:'));
+db.once('open', () => {
+  console.log('✅ MongoDB bağlantısı başarılı!');
+});
 
 // Middleware
 app.use(cors());
@@ -51,12 +66,95 @@ async function writeData(data) {
   }
 }
 
+// Koç Schema'sı
+const coachSchema = new mongoose.Schema({
+  name: String,
+  surname: String,
+  email: String,
+  discord: String,
+  specialization: String,
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Coach = mongoose.model('Coach', coachSchema);
+
+// Öğrenci Schema'sı - GÜNCELLENDİ
+const studentSchema = new mongoose.Schema({
+  name: String,
+  surname: String,
+  age: Number,
+  country: String,
+  rank: String,
+  targetRank: String,
+  tracker: String,
+  expectations: String,
+  introduction: String,
+  discord: String,
+  profileImage: String, // YENİ: Profil resmi URL'si
+  weeklySchedule: {
+    type: Map,
+    of: {
+      time: String,
+      duration: String,
+      lessonType: String, // YENİ: Ders tipi (Vod, Aim, vb)
+      coachId: String // YENİ: Hangi koçun dersi
+    }
+  },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Student = mongoose.model('Student', studentSchema);
+
 // Health check
 app.get('/', (req, res) => {
   res.json({ 
     status: 'AURA Coaching API çalışıyor!',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    mongodb: db.readyState === 1 ? 'connected' : 'disconnected'
   });
+});
+
+// ============ YENİ KOÇ ENDPOINT'LERİ ============
+
+// Tüm koçları getir
+app.get('/api/coaches', async (req, res) => {
+  try {
+    const coaches = await Coach.find().sort({ createdAt: -1 });
+    res.json({ success: true, coaches });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Yeni koç ekle
+app.post('/api/coaches', async (req, res) => {
+  try {
+    const coach = new Coach(req.body);
+    await coach.save();
+    res.json({ success: true, coachId: coach._id });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Koç sil
+app.delete('/api/coaches/:id', async (req, res) => {
+  try {
+    await Coach.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Koç güncelle
+app.put('/api/coaches/:id', async (req, res) => {
+  try {
+    await Coach.findByIdAndUpdate(req.params.id, req.body);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ============ BAŞVURULAR ============
@@ -105,13 +203,13 @@ app.delete('/api/applications/:id', async (req, res) => {
   }
 });
 
-// ============ ÖĞRENCİLER ============
+// ============ ÖĞRENCİLER (MongoDB'ye geçirildi) ============
 
 // Tüm öğrencileri getir
 app.get('/api/students', async (req, res) => {
   try {
-    const data = await readData();
-    res.json({ success: true, students: data.students });
+    const students = await Student.find().sort({ createdAt: -1 });
+    res.json({ success: true, students });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -120,17 +218,9 @@ app.get('/api/students', async (req, res) => {
 // Yeni öğrenci ekle
 app.post('/api/students', async (req, res) => {
   try {
-    const data = await readData();
-    const newStudent = {
-      id: Date.now(),
-      ...req.body,
-      registrationDate: new Date().toISOString()
-    };
-    
-    data.students.push(newStudent);
-    await writeData(data);
-    
-    res.json({ success: true, student: newStudent });
+    const student = new Student(req.body);
+    await student.save();
+    res.json({ success: true, studentId: student._id });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -139,17 +229,17 @@ app.post('/api/students', async (req, res) => {
 // Öğrenci güncelle
 app.put('/api/students/:id', async (req, res) => {
   try {
-    const data = await readData();
-    const id = parseInt(req.params.id);
+    const updatedStudent = await Student.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true, runValidators: true }
+    );
     
-    const index = data.students.findIndex(s => s.id === id);
-    if (index !== -1) {
-      data.students[index] = { ...data.students[index], ...req.body };
-      await writeData(data);
-      res.json({ success: true, student: data.students[index] });
-    } else {
-      res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
+    if (!updatedStudent) {
+      return res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
     }
+    
+    res.json({ success: true, student: updatedStudent });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -158,13 +248,28 @@ app.put('/api/students/:id', async (req, res) => {
 // Öğrenci sil
 app.delete('/api/students/:id', async (req, res) => {
   try {
-    const data = await readData();
-    const id = parseInt(req.params.id);
+    const deletedStudent = await Student.findByIdAndDelete(req.params.id);
     
-    data.students = data.students.filter(s => s.id !== id);
-    await writeData(data);
+    if (!deletedStudent) {
+      return res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
+    }
     
-    res.json({ success: true });
+    res.json({ success: true, message: 'Öğrenci başarıyla silindi' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Öğrenci detaylarını getir
+app.get('/api/students/:id', async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id);
+    
+    if (!student) {
+      return res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
+    }
+    
+    res.json({ success: true, student });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -210,6 +315,23 @@ app.delete('/api/lessons/:id', async (req, res) => {
     await writeData(data);
     
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============ KOÇ ENDPOINT'LERİ (ESKİ VERSİYON - YEDEK) ============
+
+// Koç detaylarını getir
+app.get('/api/coaches/:id', async (req, res) => {
+  try {
+    const coach = await Coach.findById(req.params.id);
+    
+    if (!coach) {
+      return res.status(404).json({ success: false, error: 'Koç bulunamadı' });
+    }
+    
+    res.json({ success: true, coach });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
