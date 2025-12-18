@@ -78,7 +78,7 @@ const coachSchema = new mongoose.Schema({
 
 const Coach = mongoose.model('Coach', coachSchema);
 
-// Öğrenci Schema'sı - GÜNCELLENDİ
+// Öğrenci Schema'sı - DÜZELTİLDİ
 const studentSchema = new mongoose.Schema({
   name: String,
   surname: String,
@@ -93,12 +93,12 @@ const studentSchema = new mongoose.Schema({
   profileImage: String, // YENİ: Profil resmi URL'si
   weeklySchedule: {
     type: Map,
-    of: {
+    of: new mongoose.Schema({
       time: String,
       duration: String,
       lessonType: String, // YENİ: Ders tipi (Vod, Aim, vb)
       coachId: String // YENİ: Hangi koçun dersi
-    }
+    }, { _id: false })
   },
   createdAt: { type: Date, default: Date.now }
 });
@@ -320,7 +320,7 @@ app.delete('/api/lessons/:id', async (req, res) => {
   }
 });
 
-// ============ KOÇ ENDPOINT'LERİ (ESKİ VERSİYON - YEDEK) ============
+// ============ KOÇ DETAY ENDPOINT'İ ============
 
 // Koç detaylarını getir
 app.get('/api/coaches/:id', async (req, res) => {
