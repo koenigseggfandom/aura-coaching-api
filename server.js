@@ -17,7 +17,8 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 const initialData = {
   applications: [],
   students: [],
-  lessons: []
+  lessons: [],
+  coaches: []
 };
 
 // Veri dosyasını başlat
@@ -124,7 +125,8 @@ app.post('/api/students', async (req, res) => {
     const newStudent = {
       id: Date.now(),
       ...req.body,
-      registrationDate: new Date().toISOString()
+      registrationDate: new Date().toISOString(),
+      weeklySchedule: req.body.weeklySchedule || {}
     };
     
     data.students.push(newStudent);
@@ -144,7 +146,11 @@ app.put('/api/students/:id', async (req, res) => {
     
     const index = data.students.findIndex(s => s.id === id);
     if (index !== -1) {
-      data.students[index] = { ...data.students[index], ...req.body };
+      data.students[index] = { 
+        ...data.students[index], 
+        ...req.body,
+        weeklySchedule: req.body.weeklySchedule || data.students[index].weeklySchedule
+      };
       await writeData(data);
       res.json({ success: true, student: data.students[index] });
     } else {
@@ -207,6 +213,71 @@ app.delete('/api/lessons/:id', async (req, res) => {
     const id = parseInt(req.params.id);
     
     data.lessons = data.lessons.filter(l => l.id !== id);
+    await writeData(data);
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============ KOÇLAR ============
+
+// Tüm koçları getir
+app.get('/api/coaches', async (req, res) => {
+  try {
+    const data = await readData();
+    res.json({ success: true, coaches: data.coaches });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Yeni koç ekle
+app.post('/api/coaches', async (req, res) => {
+  try {
+    const data = await readData();
+    const newCoach = {
+      id: Date.now(),
+      ...req.body,
+      createdAt: new Date().toISOString()
+    };
+    
+    data.coaches.push(newCoach);
+    await writeData(data);
+    
+    res.json({ success: true, coach: newCoach });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Koç güncelle
+app.put('/api/coaches/:id', async (req, res) => {
+  try {
+    const data = await readData();
+    const id = parseInt(req.params.id);
+    
+    const index = data.coaches.findIndex(c => c.id === id);
+    if (index !== -1) {
+      data.coaches[index] = { ...data.coaches[index], ...req.body };
+      await writeData(data);
+      res.json({ success: true, coach: data.coaches[index] });
+    } else {
+      res.status(404).json({ success: false, error: 'Koç bulunamadı' });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Koç sil
+app.delete('/api/coaches/:id', async (req, res) => {
+  try {
+    const data = await readData();
+    const id = parseInt(req.params.id);
+    
+    data.coaches = data.coaches.filter(c => c.id !== id);
     await writeData(data);
     
     res.json({ success: true });
