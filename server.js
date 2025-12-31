@@ -34,7 +34,15 @@ async function initDataFile() {
 async function readData() {
   try {
     const data = await fs.readFile(DATA_FILE, 'utf8');
-    return JSON.parse(data);
+    let parsedData = JSON.parse(data);
+    
+    // Eski veriler için isRead alanını ekle
+    parsedData.applications = parsedData.applications.map(app => ({
+      ...app,
+      isRead: app.isRead !== undefined ? app.isRead : false
+    }));
+    
+    return parsedData;
   } catch (error) {
     console.error('Veri okuma hatası:', error);
     return initialData;
@@ -79,6 +87,7 @@ app.post('/api/applications', async (req, res) => {
     const newApplication = {
       id: Date.now(),
       ...req.body,
+      isRead: false,
       date: new Date().toISOString()
     };
     
@@ -101,6 +110,25 @@ app.delete('/api/applications/:id', async (req, res) => {
     await writeData(data);
     
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Başvuruyu okundu olarak işaretle
+app.put('/api/applications/:id/mark-read', async (req, res) => {
+  try {
+    const data = await readData();
+    const id = parseInt(req.params.id);
+    
+    const index = data.applications.findIndex(app => app.id === id);
+    if (index !== -1) {
+      data.applications[index].isRead = true;
+      await writeData(data);
+      res.json({ success: true, application: data.applications[index] });
+    } else {
+      res.status(404).json({ success: false, error: 'Başvuru bulunamadı' });
+    }
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
