@@ -8,6 +8,16 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
+app.use((req, res, next) => {
+    console.log('📥 Gelen İstek:', {
+        method: req.method,
+        url: req.url,
+        timestamp: new Date().toISOString(),
+        ip: req.ip,
+        body: req.method === 'POST' || req.method === 'PUT' ? req.body : {}
+    });
+    next();
+});
 app.use(express.json());
 
 // Veri dosyası yolu
