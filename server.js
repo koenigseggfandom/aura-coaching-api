@@ -143,7 +143,86 @@ app.put('/api/applications/:id/mark-read', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
+// server.js'ye ekleyin
+app.get('/admin-view', async (req, res) => {
+    try {
+        const data = await readData();
+        
+        let html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>AURA Coaching - Veri Görüntüleme</title>
+            <style>
+                body { font-family: Arial; padding: 20px; }
+                .section { margin-bottom: 30px; }
+                table { border-collapse: collapse; width: 100%; }
+                th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                th { background-color: #f2f2f2; }
+                .count { font-size: 20px; font-weight: bold; color: #4CAF50; }
+            </style>
+        </head>
+        <body>
+            <h1>📊 AURA Coaching Veri Görüntüleme</h1>
+            <p>Son güncelleme: ${new Date().toLocaleString('tr-TR')}</p>
+            
+            <div class="section">
+                <h2>📈 İstatistikler</h2>
+                <p>Toplam Başvuru: <span class="count">${data.applications.length}</span></p>
+                <p>Toplam Öğrenci: <span class="count">${data.students.length}</span></p>
+                <p>Toplam Koç: <span class="count">${data.coaches.length}</span></p>
+            </div>
+        `;
+        
+        // Başvurular
+        if (data.applications.length > 0) {
+            html += `
+            <div class="section">
+                <h2>📝 Son Başvurular</h2>
+                <table>
+                    <tr><th>Ad Soyad</th><th>Yaş</th><th>Ülke</th><th>Rank</th><th>Tarih</th></tr>
+                    ${data.applications.slice(-10).reverse().map(app => `
+                        <tr>
+                            <td>${app.name} ${app.surname}</td>
+                            <td>${app.age}</td>
+                            <td>${app.country}</td>
+                            <td>${app.rank}</td>
+                            <td>${new Date(app.date).toLocaleDateString('tr-TR')}</td>
+                        </tr>
+                    `).join('')}
+                </table>
+            </div>
+            `;
+        }
+        
+        // Öğrenciler
+        if (data.students.length > 0) {
+            html += `
+            <div class="section">
+                <h2>👨‍🎓 Kayıtlı Öğrenciler</h2>
+                <table>
+                    <tr><th>Ad Soyad</th><th>Discord</th><th>Ülke</th><th>Rank</th><th>Kayıt Tarihi</th></tr>
+                    ${data.students.map(student => `
+                        <tr>
+                            <td>${student.name} ${student.surname}</td>
+                            <td>${student.discord || '-'}</td>
+                            <td>${student.country}</td>
+                            <td>${student.rank}</td>
+                            <td>${new Date(student.registrationDate).toLocaleDateString('tr-TR')}</td>
+                        </tr>
+                    `).join('')}
+                </table>
+            </div>
+            `;
+        }
+        
+        html += `</body></html>`;
+        
+        res.send(html);
+    } catch (error) {
+        res.status(500).send(`<h1>Hata:</h1><pre>${error.message}</pre>`);
+    }
+});
 // ============ ÖĞRENCİLER ============
 
 // Tüm öğrencileri getir
