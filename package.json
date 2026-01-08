@@ -1,7 +1,7 @@
 {
   "name": "aura-coaching-api",
   "version": "2.0.0",
-  "description": "AURA Coaching Backend API with PostgreSQL",
+  "description": "AURA Coaching Backend API with PostgreSQL + Email",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -14,8 +14,8 @@
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "pg": "^8.11.3",
-    "nodemailer": "^6.9.8",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "node-fetch": "^2.7.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
