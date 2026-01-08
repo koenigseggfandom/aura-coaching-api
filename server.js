@@ -5,7 +5,7 @@ const fetch = require('node-fetch');
 const cron = require('node-cron');
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 
 // ✅ PostgreSQL bağlantısı - DATABASE_URL Railway tarafından otomatik verilir
 const pool = new Pool({
@@ -325,4 +325,5 @@ app.listen(PORT, async () => {
   console.log(`📊 PostgreSQL: Bağlı`);
   console.log(`📧 Email: Her 3 günde bir otomatik`);
 });
+
 
