@@ -39,10 +39,14 @@ async function initDatabase() {
         expectations TEXT,
         introduction TEXT,
         discord VARCHAR(100),
+        availability TEXT,
         is_read BOOLEAN DEFAULT false,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // Mevcut tablolara yeni kolonları ekle (zaten varsa hata vermesin)
+    await client.query(`ALTER TABLE applications ADD COLUMN IF NOT EXISTS availability TEXT;`).catch(() => {});
 
     // Öğrenciler tablosu
     await client.query(`
@@ -69,11 +73,15 @@ async function initDatabase() {
         id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         surname VARCHAR(100) NOT NULL,
+        username VARCHAR(100),
         specialty TEXT,
         contact TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // Mevcut coaches tablosuna username kolonunu ekle (zaten varsa hata vermesin)
+    await client.query(`ALTER TABLE coaches ADD COLUMN IF NOT EXISTS username VARCHAR(100);`).catch(() => {});
 
     console.log('✅ PostgreSQL tabloları hazır!');
   } catch (error) {
@@ -194,11 +202,11 @@ app.get('/api/applications', async (req, res) => {
 
 app.post('/api/applications', async (req, res) => {
   try {
-    const { name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord } = req.body;
+    const { name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord, availability } = req.body;
     const result = await pool.query(
-      `INSERT INTO applications (name, surname, age, country, rank, target_rank, tracker, expectations, introduction, discord) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord]
+      `INSERT INTO applications (name, surname, age, country, rank, target_rank, tracker, expectations, introduction, discord, availability) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord, availability]
     );
     res.json({ success: true, application: result.rows[0] });
   } catch (error) {
@@ -279,8 +287,8 @@ app.get('/api/coaches', async (req, res) => {
 
 app.post('/api/coaches', async (req, res) => {
   try {
-    const { name, surname, specialty, contact } = req.body;
-    const result = await pool.query('INSERT INTO coaches (name, surname, specialty, contact) VALUES ($1, $2, $3, $4) RETURNING *', [name, surname, specialty, contact]);
+    const { name, surname, username, specialty, contact } = req.body;
+    const result = await pool.query('INSERT INTO coaches (name, surname, username, specialty, contact) VALUES ($1, $2, $3, $4, $5) RETURNING *', [name, surname, username, specialty, contact]);
     res.json({ success: true, coach: result.rows[0] });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -289,8 +297,8 @@ app.post('/api/coaches', async (req, res) => {
 
 app.put('/api/coaches/:id', async (req, res) => {
   try {
-    const { name, surname, specialty, contact } = req.body;
-    const result = await pool.query('UPDATE coaches SET name=$1, surname=$2, specialty=$3, contact=$4 WHERE id=$5 RETURNING *', [name, surname, specialty, contact, req.params.id]);
+    const { name, surname, username, specialty, contact } = req.body;
+    const result = await pool.query('UPDATE coaches SET name=$1, surname=$2, username=$3, specialty=$4, contact=$5 WHERE id=$6 RETURNING *', [name, surname, username, specialty, contact, req.params.id]);
     res.json({ success: true, coach: result.rows[0] });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -325,5 +333,3 @@ app.listen(PORT, async () => {
   console.log(`📊 PostgreSQL: Bağlı`);
   console.log(`📧 Email: Her 3 günde bir otomatik`);
 });
-
-
