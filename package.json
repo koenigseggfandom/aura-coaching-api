@@ -16,6 +16,7 @@
     "pg": "^8.11.3",
     "node-cron": "^3.0.3",
     "node-fetch": "^2.7.0"
+    "mongoose": "^8.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
@@ -24,3 +25,4 @@
     "node": ">=18.0.0"
   }
 }
+
