@@ -8,13 +8,11 @@ const mongoose = require('mongoose');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// PostgreSQL bağlantısı
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 app.use((req, res, next) => {
@@ -22,20 +20,17 @@ app.use((req, res, next) => {
   next();
 });
 
-// ============================================================
-// MONGODB (BOT VERİLERİ)
-// ============================================================
 let mongoConnected = false;
 
 async function connectMongo() {
   const url = process.env.MONGODB_URL;
-  if (!url) { console.log('⚠️ MONGODB_URL yok, bot verileri devre dışı'); return; }
+  if (!url) { console.log('⚠️ MONGODB_URL yok'); return; }
   try {
     await mongoose.connect(url);
     mongoConnected = true;
-    console.log('✅ MongoDB (Bot) bağlantısı kuruldu!');
+    console.log('✅ MongoDB bağlantısı kuruldu!');
   } catch (e) {
-    console.error('❌ MongoDB bağlantı hatası:', e.message);
+    console.error('❌ MongoDB hatası:', e.message);
   }
 }
 
@@ -62,9 +57,6 @@ const lessonSchema = new mongoose.Schema({
 const BotStudent = mongoose.model('Student', studentSchema);
 const BotLesson = mongoose.model('Lesson', lessonSchema);
 
-// ============================================================
-// POSTGRESQL TABLOLARI
-// ============================================================
 async function initDatabase() {
   const client = await pool.connect();
   try {
@@ -87,6 +79,7 @@ async function initDatabase() {
       );
     `);
     await client.query(`ALTER TABLE applications ADD COLUMN IF NOT EXISTS availability TEXT;`).catch(() => {});
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS students (
         id SERIAL PRIMARY KEY,
@@ -101,9 +94,18 @@ async function initDatabase() {
         introduction TEXT,
         discord VARCHAR(100),
         weekly_schedule JSONB DEFAULT '{}'::jsonb,
+        is_active BOOLEAN DEFAULT true,
+        total_lessons INTEGER DEFAULT 0,
+        remaining_lessons INTEGER DEFAULT 0,
+        weekly_lessons INTEGER DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    await client.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;`).catch(() => {});
+    await client.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS total_lessons INTEGER DEFAULT 0;`).catch(() => {});
+    await client.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS remaining_lessons INTEGER DEFAULT 0;`).catch(() => {});
+    await client.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS weekly_lessons INTEGER DEFAULT 1;`).catch(() => {});
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS coaches (
         id SERIAL PRIMARY KEY,
@@ -116,6 +118,25 @@ async function initDatabase() {
       );
     `);
     await client.query(`ALTER TABLE coaches ADD COLUMN IF NOT EXISTS username VARCHAR(100);`).catch(() => {});
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS lesson_types (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL UNIQUE,
+        color VARCHAR(50) DEFAULT '#6366f1',
+        is_default BOOLEAN DEFAULT false,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await client.query(`
+      INSERT INTO lesson_types (name, color, is_default) VALUES
+        ('Aim', '#10b981', true),
+        ('Movement', '#ec4899', true),
+        ('VOD', '#6366f1', true),
+        ('Gamesense', '#8b5cf6', true)
+      ON CONFLICT (name) DO NOTHING;
+    `).catch(() => {});
+
     console.log('✅ PostgreSQL tabloları hazır!');
   } catch (error) {
     console.error('❌ Veritabanı hatası:', error);
@@ -124,12 +145,8 @@ async function initDatabase() {
   }
 }
 
-// ============================================================
-// EMAIL
-// ============================================================
 async function sendDataReport() {
   try {
-    console.log('📧 Email raporu hazırlanıyor...', new Date().toLocaleString('tr-TR'));
     const client = await pool.connect();
     const [apps, studs, coachs] = await Promise.all([
       client.query('SELECT * FROM applications ORDER BY created_at DESC'),
@@ -137,143 +154,173 @@ async function sendDataReport() {
       client.query('SELECT * FROM coaches ORDER BY created_at DESC')
     ]);
     client.release();
-    const applications = apps.rows;
-    const students = studs.rows;
-    const coaches = coachs.rows;
-    const emailHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:Arial,sans-serif;line-height:1.6;color:#333;max-width:1200px;margin:0 auto;background:#f5f5f5;padding:20px}.header{background:linear-gradient(135deg,#6366f1,#ec4899);color:#fff;padding:40px;text-align:center;border-radius:10px;margin-bottom:30px}.header h1{margin:0 0 10px;font-size:42px}.stat{background:#fff;padding:30px;border-radius:12px;text-align:center;flex:1;box-shadow:0 2px 8px rgba(0,0,0,.1)}.stat-number{font-size:48px;font-weight:700;color:#6366f1}.footer{text-align:center;padding:30px;background:#fff;border-radius:12px;margin-top:30px;color:#666}</style></head><body>
-    <div class="header"><h1>🎮 AURA COACHING</h1><p>3 Günlük Veri Raporu - ${new Date().toLocaleDateString('tr-TR')}</p></div>
-    <div style="display:flex;gap:20px;margin:30px 0">
-      <div class="stat"><div class="stat-number">${applications.length}</div><div>Toplam Başvuru</div></div>
-      <div class="stat"><div class="stat-number">${students.length}</div><div>Toplam Öğrenci</div></div>
-      <div class="stat"><div class="stat-number">${coaches.length}</div><div>Toplam Koç</div></div>
-    </div>
-    <div class="footer"><p><strong>AURA Coaching</strong> - Profesyonel Valorant Koçluk Sistemi</p></div>
-    </body></html>`;
+    const emailHTML = `<!DOCTYPE html><html><body><h1>AURA Raporu</h1><p>Aktif: ${studs.rows.filter(s=>s.is_active).length} / Toplam: ${studs.rows.length}</p></body></html>`;
     const formData = new URLSearchParams({
-      '_subject': `📊 AURA Coaching - 3 Günlük Rapor - ${new Date().toLocaleDateString('tr-TR')}`,
-      '_template': 'box', '_captcha': 'false', '_html': emailHTML,
-      'toplam_basvuru': applications.length, 'toplam_ogrenci': students.length, 'toplam_koc': coaches.length
+      '_subject': `AURA Coaching Rapor - ${new Date().toLocaleDateString('tr-TR')}`,
+      '_template': 'box', '_captcha': 'false', '_html': emailHTML
     });
-    const response = await fetch('https://formsubmit.co/basvurukocluk@gmail.com', {
+    await fetch('https://formsubmit.co/basvurukocluk@gmail.com', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: formData
     });
-    if (response.ok) console.log('✅ Email gönderildi!');
-    else console.error('❌ Email hatası:', response.statusText);
   } catch (error) {
-    console.error('❌ Email gönderme hatası:', error);
+    console.error('❌ Email hatası:', error);
   }
 }
 
-// ============================================================
-// POSTGRESQL API ENDPOINTS
-// ============================================================
 app.get('/', (req, res) => {
   res.json({ status: '🚀 AURA Coaching API çalışıyor!', mongodb: mongoConnected ? '✅ Bağlı' : '❌ Bağlı değil', timestamp: new Date().toISOString() });
 });
 
 app.post('/api/send-test-report', async (req, res) => {
-  try { await sendDataReport(); res.json({ success: true, message: 'Test emaili gönderildi!' }); }
+  try { await sendDataReport(); res.json({ success: true }); }
   catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 
+// APPLICATIONS
 app.get('/api/applications', async (req, res) => {
-  try { const result = await pool.query('SELECT * FROM applications ORDER BY created_at DESC'); res.json({ success: true, applications: result.rows }); }
-  catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  try { const r = await pool.query('SELECT * FROM applications ORDER BY created_at DESC'); res.json({ success: true, applications: r.rows }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.post('/api/applications', async (req, res) => {
   try {
     const { name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord, availability } = req.body;
-    const result = await pool.query(`INSERT INTO applications (name, surname, age, country, rank, target_rank, tracker, expectations, introduction, discord, availability) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord, availability]);
-    res.json({ success: true, application: result.rows[0] });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+    const r = await pool.query(`INSERT INTO applications (name,surname,age,country,rank,target_rank,tracker,expectations,introduction,discord,availability) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [name,surname,age,country,rank,targetRank,tracker,expectations,introduction,discord,availability]);
+    res.json({ success: true, application: r.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.put('/api/applications/:id/mark-read', async (req, res) => {
-  try { const result = await pool.query('UPDATE applications SET is_read = true WHERE id = $1 RETURNING *', [req.params.id]); res.json({ success: true, application: result.rows[0] }); }
-  catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  try { const r = await pool.query('UPDATE applications SET is_read=true WHERE id=$1 RETURNING *',[req.params.id]); res.json({ success: true, application: r.rows[0] }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.delete('/api/applications/:id', async (req, res) => {
-  try { await pool.query('DELETE FROM applications WHERE id = $1', [req.params.id]); res.json({ success: true }); }
-  catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  try { await pool.query('DELETE FROM applications WHERE id=$1',[req.params.id]); res.json({ success: true }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// STUDENTS
 app.get('/api/students', async (req, res) => {
-  try { const result = await pool.query('SELECT * FROM students ORDER BY created_at DESC'); res.json({ success: true, students: result.rows }); }
-  catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  try {
+    const r = await pool.query('SELECT * FROM students ORDER BY is_active DESC, created_at DESC');
+    res.json({ success: true, students: r.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.post('/api/students', async (req, res) => {
   try {
-    const { name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord, weeklySchedule } = req.body;
-    const result = await pool.query(`INSERT INTO students (name, surname, age, country, rank, target_rank, tracker, expectations, introduction, discord, weekly_schedule) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord, JSON.stringify(weeklySchedule || {})]);
-    res.json({ success: true, student: result.rows[0], studentId: result.rows[0].id });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+    const { name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord, weeklySchedule, totalLessons, weeklyLessons } = req.body;
+    const tl = parseInt(totalLessons) || 0;
+    const wl = parseInt(weeklyLessons) || 1;
+    const r = await pool.query(
+      `INSERT INTO students (name,surname,age,country,rank,target_rank,tracker,expectations,introduction,discord,weekly_schedule,is_active,total_lessons,remaining_lessons,weekly_lessons) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$12,$13) RETURNING *`,
+      [name,surname,age,country,rank,targetRank,tracker,expectations,introduction,discord,JSON.stringify(weeklySchedule||{}),tl,wl]
+    );
+    res.json({ success: true, student: r.rows[0], studentId: r.rows[0].id });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.put('/api/students/:id', async (req, res) => {
   try {
-    const { weeklySchedule } = req.body;
-    const result = await pool.query('UPDATE students SET weekly_schedule = $1 WHERE id = $2 RETURNING *', [JSON.stringify(weeklySchedule), req.params.id]);
-    res.json({ success: true, student: result.rows[0] });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+    const { weeklySchedule, totalLessons, remainingLessons, weeklyLessons, isActive } = req.body;
+    let updates = [], values = [], idx = 1;
+    if (weeklySchedule !== undefined) { updates.push(`weekly_schedule=$${idx++}`); values.push(JSON.stringify(weeklySchedule)); }
+    if (totalLessons !== undefined) { updates.push(`total_lessons=$${idx++}`); values.push(parseInt(totalLessons)); }
+    if (remainingLessons !== undefined) {
+      updates.push(`remaining_lessons=$${idx++}`);
+      values.push(parseInt(remainingLessons));
+      if (parseInt(remainingLessons) <= 0) updates.push(`is_active=false`);
+    }
+    if (weeklyLessons !== undefined) { updates.push(`weekly_lessons=$${idx++}`); values.push(parseInt(weeklyLessons)); }
+    if (isActive !== undefined) { updates.push(`is_active=$${idx++}`); values.push(isActive); }
+    if (!updates.length) return res.json({ success: false, error: 'Güncellenecek alan yok' });
+    values.push(req.params.id);
+    const r = await pool.query(`UPDATE students SET ${updates.join(',')} WHERE id=$${idx} RETURNING *`, values);
+    res.json({ success: true, student: r.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
+app.put('/api/students/:id/toggle-active', async (req, res) => {
+  try {
+    const { isActive, totalLessons, weeklyLessons } = req.body;
+    let r;
+    if (isActive && totalLessons !== undefined) {
+      r = await pool.query(
+        `UPDATE students SET is_active=true,total_lessons=$1,remaining_lessons=$1,weekly_lessons=$2 WHERE id=$3 RETURNING *`,
+        [parseInt(totalLessons), parseInt(weeklyLessons)||1, req.params.id]
+      );
+    } else {
+      r = await pool.query(`UPDATE students SET is_active=$1 WHERE id=$2 RETURNING *`, [isActive, req.params.id]);
+    }
+    res.json({ success: true, student: r.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
 app.delete('/api/students/:id', async (req, res) => {
-  try { await pool.query('DELETE FROM students WHERE id = $1', [req.params.id]); res.json({ success: true }); }
-  catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  try { await pool.query('DELETE FROM students WHERE id=$1',[req.params.id]); res.json({ success: true }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// COACHES
 app.get('/api/coaches', async (req, res) => {
-  try { const result = await pool.query('SELECT * FROM coaches ORDER BY created_at DESC'); res.json({ success: true, coaches: result.rows }); }
-  catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  try { const r = await pool.query('SELECT * FROM coaches ORDER BY created_at DESC'); res.json({ success: true, coaches: r.rows }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.post('/api/coaches', async (req, res) => {
   try {
     const { name, surname, username, specialty, contact } = req.body;
-    const result = await pool.query('INSERT INTO coaches (name, surname, username, specialty, contact) VALUES ($1,$2,$3,$4,$5) RETURNING *', [name, surname, username, specialty, contact]);
-    res.json({ success: true, coach: result.rows[0] });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+    const r = await pool.query('INSERT INTO coaches (name,surname,username,specialty,contact) VALUES ($1,$2,$3,$4,$5) RETURNING *',[name,surname,username,specialty,contact]);
+    res.json({ success: true, coach: r.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.put('/api/coaches/:id', async (req, res) => {
   try {
     const { name, surname, username, specialty, contact } = req.body;
-    const result = await pool.query('UPDATE coaches SET name=$1, surname=$2, username=$3, specialty=$4, contact=$5 WHERE id=$6 RETURNING *', [name, surname, username, specialty, contact, req.params.id]);
-    res.json({ success: true, coach: result.rows[0] });
-  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+    const r = await pool.query('UPDATE coaches SET name=$1,surname=$2,username=$3,specialty=$4,contact=$5 WHERE id=$6 RETURNING *',[name,surname,username,specialty,contact,req.params.id]);
+    res.json({ success: true, coach: r.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.delete('/api/coaches/:id', async (req, res) => {
-  try { await pool.query('DELETE FROM coaches WHERE id = $1', [req.params.id]); res.json({ success: true }); }
-  catch (error) { res.status(500).json({ success: false, error: error.message }); }
+  try { await pool.query('DELETE FROM coaches WHERE id=$1',[req.params.id]); res.json({ success: true }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// ============================================================
-// MONGODB (BOT) API ENDPOINTS
-// ============================================================
-app.get('/api/bot/students', async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
+// LESSON TYPES
+app.get('/api/lesson-types', async (req, res) => {
   try {
-    const students = await BotStudent.find({}).sort({ totalLessons: -1 });
-    res.json({ success: true, students });
+    const r = await pool.query('SELECT * FROM lesson_types ORDER BY is_default DESC, name ASC');
+    res.json({ success: true, lessonTypes: r.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+app.post('/api/lesson-types', async (req, res) => {
+  try {
+    const { name, color } = req.body;
+    const r = await pool.query('INSERT INTO lesson_types (name,color,is_default) VALUES ($1,$2,false) RETURNING *',[name, color||'#6366f1']);
+    res.json({ success: true, lessonType: r.rows[0] });
+  } catch (e) {
+    if (e.code === '23505') res.status(400).json({ success: false, error: 'Bu ders türü zaten var!' });
+    else res.status(500).json({ success: false, error: e.message });
+  }
+});
+app.delete('/api/lesson-types/:id', async (req, res) => {
+  try {
+    const check = await pool.query('SELECT is_default FROM lesson_types WHERE id=$1',[req.params.id]);
+    if (check.rows[0]?.is_default) return res.status(400).json({ success: false, error: 'Varsayılan ders türleri silinemez!' });
+    await pool.query('DELETE FROM lesson_types WHERE id=$1',[req.params.id]);
+    res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// BOT API
+app.get('/api/bot/students', async (req, res) => {
+  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
+  try { const s = await BotStudent.find({}).sort({ totalLessons: -1 }); res.json({ success: true, students: s }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
 app.get('/api/bot/students/:discordId', async (req, res) => {
   if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
-    const student = await BotStudent.findOne({ discordId: req.params.discordId });
-    if (!student) return res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
-    const lessons = await BotLesson.find({ studentId: req.params.discordId }).sort({ date: -1, lessonSequence: -1 });
-    res.json({ success: true, student, lessons });
+    const s = await BotStudent.findOne({ discordId: req.params.discordId });
+    if (!s) return res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
+    const l = await BotLesson.find({ studentId: req.params.discordId }).sort({ date: -1, lessonSequence: -1 });
+    res.json({ success: true, student: s, lessons: l });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.get('/api/bot/lessons', async (req, res) => {
   if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
@@ -285,16 +332,13 @@ app.get('/api/bot/lessons', async (req, res) => {
     res.json({ success: true, lessons, total, page, totalPages: Math.ceil(total / limit) });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
 app.get('/api/bot/stats', async (req, res) => {
   if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
     const today = new Date().toISOString().split('T')[0];
     const [totalStudents, totalLessons, todayLessons, topStudent] = await Promise.all([
-      BotStudent.countDocuments({}),
-      BotLesson.countDocuments({}),
-      BotLesson.countDocuments({ date: today }),
-      BotStudent.findOne({}).sort({ totalLessons: -1 }),
+      BotStudent.countDocuments({}), BotLesson.countDocuments({}),
+      BotLesson.countDocuments({ date: today }), BotStudent.findOne({}).sort({ totalLessons: -1 }),
     ]);
     const dates = [];
     for (let i = 6; i >= 0; i--) dates.push(new Date(Date.now() - i * 86400000).toISOString().split('T')[0]);
@@ -313,14 +357,19 @@ app.get('/api/bot/stats', async (req, res) => {
     res.json({ success: true, stats: { totalStudents, totalLessons, todayLessons, topStudent: topStudent ? { name: topStudent.name, totalLessons: topStudent.totalLessons } : null, last7Days, topInstructors, topCategories } });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-
-// ============================================================
-// CRON & SERVER
-// ============================================================
-cron.schedule('0 0 */3 * *', () => {
-  console.log('🔔 3 günlük rapor zamanı!');
-  sendDataReport();
+app.get('/api/bot/match/:discord', async (req, res) => {
+  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
+  try {
+    const s = await BotStudent.findOne({
+      $or: [{ discordId: req.params.discord }, { name: { $regex: req.params.discord, $options: 'i' } }]
+    });
+    if (!s) return res.json({ success: false, error: 'Bulunamadı' });
+    const l = await BotLesson.find({ studentId: s.discordId }).sort({ timestamp: -1 }).limit(20);
+    res.json({ success: true, student: s, lessons: l });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
+
+cron.schedule('0 0 */3 * *', () => sendDataReport());
 
 app.listen(PORT, async () => {
   await initDatabase();
