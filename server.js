@@ -18,7 +18,8 @@ const PORT = process.env.PORT || 3000;
 //   DISCORD_LOG_CHANNEL_ID → (opsiyonel) Kayıt bildirimlerinin gönderileceği kanal ID'si
 //   DISCORD_WEBHOOK_URL    → Başvuru bildirimlerinin gönderileceği webhook URL'i
 //   API_SECRET_KEY         → Frontend'in API'ya erişimi için gizli anahtar
-//   ALLOWED_ORIGINS        → İzin verilen origin'ler (virgülle ayrılmış, örn: https://auracoaching.com.tr)
+//   ALLOWED_ORIGINS        → İzin verilen origin'ler (virgülle ayrılmış)
+//                            Örn: https://auracoaching.com.tr,https://admin.auracoaching.com.tr
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DISCORD_BOT_TOKEN    = process.env.DISCORD_BOT_TOKEN    || '';
@@ -36,18 +37,29 @@ const pool = new Pool({
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-  : ['https://auracoaching.com.tr', 'https://www.auracoaching.com.tr'];
+  : [
+      'https://auracoaching.com.tr',
+      'https://www.auracoaching.com.tr',
+      'https://admin.auracoaching.com.tr',
+    ];
 
-app.use(cors({
+const corsOptions = {
   origin: (origin, callback) => {
     // Sunucu-sunucu istekleri (origin yok) ve geliştirme ortamı için izin ver
     if (!origin || process.env.NODE_ENV !== 'production') return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    console.warn(`CORS engellendi: ${origin}`);
     callback(new Error('CORS: Bu origin\'e izin verilmiyor'));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'x-api-key']
-}));
+  allowedHeaders: ['Content-Type', 'x-api-key'],
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
+
+// Preflight (OPTIONS) isteklerini tüm route'lar için handle et
+app.options('*', cors(corsOptions));
 
 // ─── RATE LIMITER (saf JS, bağımlılık gerekmez) ───────────────────────────────
 const rateMap = new Map(); // ip → { count, resetAt }
@@ -266,11 +278,6 @@ async function initDatabase() {
 }
 
 // ─── DISCORD YARDIMCI ─────────────────────────────────────────────────────────
-/**
- * Discord REST API'ye bot token ile istek gönderir.
- * 204 No Content → { success: true }
- * 4xx/5xx        → hata fırlatır
- */
 async function discordRequest(method, path, body = null) {
   if (!DISCORD_BOT_TOKEN) throw new Error('DISCORD_BOT_TOKEN env değişkeni eksik');
   const opts = {
@@ -290,14 +297,6 @@ async function discordRequest(method, path, body = null) {
 
 // ─── DISCORD ENDPOINTLERİ ────────────────────────────────────────────────────
 
-/**
- * POST /api/discord/assign-role
- * Body: { discordId, studentName }
- *
- * Sunucudaki kullanıcıya DISCORD_ROLE_ID rolünü atar.
- * Gerekli bot izni: Manage Roles
- * Rol, bot rolünün hiyerarşide ALTINDA olmalıdır.
- */
 app.post('/api/discord/assign-role', async (req, res) => {
   try {
     const { discordId, studentName } = req.body;
@@ -310,7 +309,6 @@ app.post('/api/discord/assign-role', async (req, res) => {
       });
     }
 
-    // PUT /guilds/{guild}/members/{user}/roles/{role}  →  204 No Content
     await discordRequest(
       'PUT',
       `/guilds/${DISCORD_GUILD_ID}/members/${discordId}/roles/${DISCORD_ROLE_ID}`
@@ -324,13 +322,6 @@ app.post('/api/discord/assign-role', async (req, res) => {
   }
 });
 
-/**
- * POST /api/discord/register
- * Body: { discordId, studentName }
- *
- * İsteğe bağlı: DISCORD_LOG_CHANNEL_ID env'de tanımlıysa log kanalına bildirim gönderir.
- * Her durumda success döner (bildirim opsiyoneldir).
- */
 app.post('/api/discord/register', async (req, res) => {
   try {
     const { discordId, studentName } = req.body;
@@ -363,13 +354,6 @@ app.post('/api/discord/register', async (req, res) => {
   }
 });
 
-/**
- * GET /api/discord/user/:discordId
- *
- * Discord kullanıcısının kullanıcı adını ve görünen adını döner.
- * 1 saatlik sunucu taraflı önbellek (rate limit koruması).
- * Yanıt: { success, username, globalName, id }
- */
 const discordUsernameCache = new Map();
 const DISCORD_CACHE_TTL = 60 * 60 * 1000; // 1 saat
 
@@ -378,7 +362,6 @@ app.get('/api/discord/user/:discordId', async (req, res) => {
     const { discordId } = req.params;
     if (!discordId) return res.status(400).json({ success: false, error: 'discordId gerekli' });
 
-    // Önbellek kontrolü
     const cached = discordUsernameCache.get(discordId);
     if (cached && Date.now() - cached.cachedAt < DISCORD_CACHE_TTL) {
       return res.json({
@@ -394,9 +377,7 @@ app.get('/api/discord/user/:discordId', async (req, res) => {
       return res.status(500).json({ success: false, error: 'DISCORD_BOT_TOKEN env eksik' });
     }
 
-    // GET /users/:id
     const user = await discordRequest('GET', `/users/${discordId}`);
-
     const username   = user.username   || discordId;
     const globalName = user.global_name || user.username || null;
 
@@ -438,7 +419,6 @@ app.post('/api/applications', formRateLimiter, async (req, res) => {
       tracker, expectations, introduction, discord, availability
     } = req.body;
 
-    // Temel doğrulama
     if (!name || !surname || !age || !country || !rank || !targetRank || !discord) {
       return res.status(400).json({ success: false, error: 'Zorunlu alanlar eksik' });
     }
@@ -453,7 +433,6 @@ app.post('/api/applications', formRateLimiter, async (req, res) => {
       [name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord, availability]
     );
 
-    // Discord webhook bildirimi
     await sendDiscordWebhook({
       title: '🎮 Yeni Koçluk Başvurusu',
       color: 0x6366f1,
@@ -517,7 +496,6 @@ app.post('/api/coach-applications', formRateLimiter, async (req, res) => {
       [name, surname, parseInt(age), discord, tracker, strongPoints, languages]
     );
 
-    // Discord webhook bildirimi
     await sendDiscordWebhook({
       title: '🏆 Yeni Koç Başvurusu',
       color: 0xec4899,
@@ -555,12 +533,6 @@ app.delete('/api/coach-applications/:id', requireApiKey, async (req, res) => {
 });
 
 // ─── STUDENTS ─────────────────────────────────────────────────────────────────
-
-/**
- * GET /api/students
- * Query: ?archived=true  → sadece arşivlenmiş öğrenciler
- *        (parametre yok) → archived=false olanlar (normal liste)
- */
 app.get('/api/students', requireApiKey, async (req, res) => {
   try {
     const showArchived = req.query.archived === 'true';
@@ -574,12 +546,6 @@ app.get('/api/students', requireApiKey, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-/**
- * POST /api/students
- * Yeni öğrenci ekler.
- * remaining_lessons, total_lessons ile aynı başlar.
- * archived = false (varsayılan)
- */
 app.post('/api/students', requireApiKey, async (req, res) => {
   try {
     const {
@@ -611,13 +577,6 @@ app.post('/api/students', requireApiKey, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-/**
- * PUT /api/students/:id
- * Kısmi güncelleme: sadece gönderilen alanlar güncellenir.
- * archived=true  → archived_at=NOW(), is_active=false
- * archived=false → archived_at=NULL
- * remaining_lessons <= 0 → is_active=false (otomatik pasife alma)
- */
 app.put('/api/students/:id', requireApiKey, async (req, res) => {
   try {
     const {
@@ -641,7 +600,6 @@ app.put('/api/students/:id', requireApiKey, async (req, res) => {
       const rl = parseInt(remainingLessons);
       updates.push(`remaining_lessons=$${idx++}`);
       values.push(rl);
-      // Kalan ders sıfırlanırsa otomatik pasife al (isActive override edilmezse)
       if (rl <= 0 && isActive === undefined) {
         updates.push(`is_active=false`);
       }
@@ -659,7 +617,6 @@ app.put('/api/students/:id', requireApiKey, async (req, res) => {
       values.push(Boolean(archived));
       if (archived === true) {
         updates.push(`archived_at=NOW()`);
-        // Arşivlenince pasife al (is_active zaten false olacak)
         if (isActive === undefined) updates.push(`is_active=false`);
       } else {
         updates.push(`archived_at=NULL`);
@@ -683,18 +640,12 @@ app.put('/api/students/:id', requireApiKey, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-/**
- * PUT /api/students/:id/toggle-active
- * is_active durumunu değiştirir.
- * Aktifleştirirken ders paketi de güncellenir.
- */
 app.put('/api/students/:id/toggle-active', requireApiKey, async (req, res) => {
   try {
     const { isActive, totalLessons, weeklyLessons } = req.body;
     let r;
 
     if (isActive && totalLessons !== undefined) {
-      // Yeniden aktifleştirme — yeni ders paketi ile
       r = await pool.query(
         `UPDATE students
          SET is_active=true,
@@ -716,11 +667,6 @@ app.put('/api/students/:id/toggle-active', requireApiKey, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-/**
- * DELETE /api/students/:id
- * Kalıcı silme — frontend artık arşivleme kullanıyor.
- * Sadece "Arşiv" ekranındaki "Kalıcı Sil" butonu bu endpoint'i çağırır.
- */
 app.delete('/api/students/:id', requireApiKey, async (req, res) => {
   try {
     await pool.query('DELETE FROM students WHERE id=$1', [req.params.id]);
@@ -855,7 +801,6 @@ app.get('/api/bot/stats', requireApiKey, async (req, res) => {
       BotStudent.findOne({}).sort({ totalLessons: -1 }),
     ]);
 
-    // Son 7 günün tarihlerini oluştur
     const dates = [];
     for (let i = 6; i >= 0; i--) {
       dates.push(new Date(Date.now() - i * 86400000).toISOString().split('T')[0]);
@@ -924,7 +869,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Manuel rapor tetikleyici (test için)
 app.post('/api/send-test-report', requireApiKey, async (req, res) => {
   try {
     await sendDataReport();
@@ -946,11 +890,11 @@ async function sendDataReport() {
     ]);
     client.release();
 
-    const activeCount    = studs.rows.filter(s => s.is_active && !s.archived).length;
-    const archivedCount  = studs.rows.filter(s => s.archived).length;
-    const unreadApps     = apps.rows.filter(a => !a.is_read).length;
+    const activeCount     = studs.rows.filter(s => s.is_active && !s.archived).length;
+    const archivedCount   = studs.rows.filter(s => s.archived).length;
+    const unreadApps      = apps.rows.filter(a => !a.is_read).length;
     const unreadCoachApps = coachApps.rows.filter(a => !a.is_read).length;
-    const totalWeekly    = studs.rows
+    const totalWeekly     = studs.rows
       .filter(s => s.is_active && !s.archived)
       .reduce((sum, s) => sum + (parseInt(s.weekly_lessons) || 0), 0);
 
@@ -968,12 +912,12 @@ async function sendDataReport() {
           color: 0x6366f1,
           description: `**Tarih:** ${new Date().toLocaleDateString('tr-TR')}`,
           fields: [
-            { name: '👥 Aktif Öğrenci',        value: String(activeCount),       inline: true },
-            { name: '📦 Arşivlenen',            value: String(archivedCount),     inline: true },
-            { name: '📚 Haftalık Toplam Ders',  value: String(totalWeekly),       inline: true },
-            { name: '📋 Bekleyen Öğrenci Başvurusu', value: String(unreadApps),  inline: true },
-            { name: '🏆 Bekleyen Koç Başvurusu', value: String(unreadCoachApps), inline: true },
-            { name: '🎓 Toplam Koç',            value: String(coachs.rows.length), inline: true },
+            { name: '👥 Aktif Öğrenci',             value: String(activeCount),        inline: true },
+            { name: '📦 Arşivlenen',                value: String(archivedCount),      inline: true },
+            { name: '📚 Haftalık Toplam Ders',       value: String(totalWeekly),        inline: true },
+            { name: '📋 Bekleyen Öğrenci Başvurusu', value: String(unreadApps),         inline: true },
+            { name: '🏆 Bekleyen Koç Başvurusu',     value: String(unreadCoachApps),    inline: true },
+            { name: '🎓 Toplam Koç',                 value: String(coachs.rows.length), inline: true },
           ],
           timestamp: new Date().toISOString(),
           footer: { text: 'AURA Coaching — Otomatik Rapor Sistemi' }
