@@ -1,7 +1,7 @@
 {
   "name": "aura-coaching-api",
-  "version": "2.0.0",
-  "description": "AURA Coaching Backend API with PostgreSQL + Email",
+  "version": "2.1.0",
+  "description": "AURA Coaching Backend API with PostgreSQL + Discord Webhook",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -25,5 +25,3 @@
     "node": ">=18.0.0"
   }
 }
-
-
