@@ -10,26 +10,100 @@ const PORT = process.env.PORT || 3000;
 
 // ─── ORTAM DEĞİŞKENLERİ ──────────────────────────────────────────────────────
 // Railway'de şunları env olarak eklemen lazım:
-//   DATABASE_URL        → PostgreSQL bağlantı string'i
-//   MONGODB_URL         → MongoDB bağlantı string'i
-//   DISCORD_BOT_TOKEN   → Botun token'ı
-//   DISCORD_GUILD_ID    → Sunucunun ID'si
-//   DISCORD_ROLE_ID     → Atanacak öğrenci rolünün ID'si
+//   DATABASE_URL           → PostgreSQL bağlantı string'i
+//   MONGODB_URL            → MongoDB bağlantı string'i
+//   DISCORD_BOT_TOKEN      → Botun token'ı
+//   DISCORD_GUILD_ID       → Sunucunun ID'si
+//   DISCORD_ROLE_ID        → Atanacak öğrenci rolünün ID'si
 //   DISCORD_LOG_CHANNEL_ID → (opsiyonel) Kayıt bildirimlerinin gönderileceği kanal ID'si
+//   DISCORD_WEBHOOK_URL    → Başvuru bildirimlerinin gönderileceği webhook URL'i
+//   API_SECRET_KEY         → Frontend'in API'ya erişimi için gizli anahtar
+//   ALLOWED_ORIGINS        → İzin verilen origin'ler (virgülle ayrılmış, örn: https://auracoaching.com.tr)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DISCORD_BOT_TOKEN    = process.env.DISCORD_BOT_TOKEN    || '';
 const DISCORD_GUILD_ID     = process.env.DISCORD_GUILD_ID     || '';
 const DISCORD_ROLE_ID      = process.env.DISCORD_ROLE_ID      || '';
 const DISCORD_API          = 'https://discord.com/api/v10';
+const DISCORD_WEBHOOK_URL  = process.env.DISCORD_WEBHOOK_URL  || '';
+const API_SECRET_KEY       = process.env.API_SECRET_KEY       || '';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-app.use(cors());
-app.use(express.json());
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+  : ['https://auracoaching.com.tr', 'https://www.auracoaching.com.tr'];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Sunucu-sunucu istekleri (origin yok) ve geliştirme ortamı için izin ver
+    if (!origin || process.env.NODE_ENV !== 'production') return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error('CORS: Bu origin\'e izin verilmiyor'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-api-key']
+}));
+
+// ─── RATE LIMITER (saf JS, bağımlılık gerekmez) ───────────────────────────────
+const rateMap = new Map(); // ip → { count, resetAt }
+const RATE_LIMIT      = 60;   // istek başına pencere
+const RATE_WINDOW_MS  = 60 * 1000; // 1 dakika
+
+function rateLimiter(req, res, next) {
+  const ip  = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
+  const now = Date.now();
+  let entry = rateMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 1, resetAt: now + RATE_WINDOW_MS };
+  } else {
+    entry.count++;
+  }
+  rateMap.set(ip, entry);
+  if (entry.count > RATE_LIMIT) {
+    return res.status(429).json({ success: false, error: 'Çok fazla istek. Lütfen biraz bekleyin.' });
+  }
+  next();
+}
+
+// Başvuru formları için daha sıkı rate limit (spam koruması)
+const formRateMap = new Map();
+const FORM_RATE_LIMIT    = 5;  // 10 dakikada 5 form
+const FORM_RATE_WINDOW   = 10 * 60 * 1000;
+
+function formRateLimiter(req, res, next) {
+  const ip  = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
+  const now = Date.now();
+  let entry = formRateMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 1, resetAt: now + FORM_RATE_WINDOW };
+  } else {
+    entry.count++;
+  }
+  formRateMap.set(ip, entry);
+  if (entry.count > FORM_RATE_LIMIT) {
+    return res.status(429).json({ success: false, error: 'Çok fazla başvuru gönderdiniz. Lütfen 10 dakika bekleyin.' });
+  }
+  next();
+}
+
+// ─── API KEY MIDDLEWARE (admin endpoint'leri için) ────────────────────────────
+function requireApiKey(req, res, next) {
+  // API_SECRET_KEY env'de tanımlı değilse bu korumayı atla (geliştirme ortamı)
+  if (!API_SECRET_KEY) return next();
+  const key = req.headers['x-api-key'];
+  if (key !== API_SECRET_KEY) {
+    return res.status(401).json({ success: false, error: 'Yetkisiz erişim' });
+  }
+  next();
+}
+
+app.use(express.json({ limit: '1mb' }));
+app.use(rateLimiter);
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url} - ${new Date().toISOString()}`);
   next();
@@ -133,6 +207,22 @@ async function initDatabase() {
       `ALTER TABLE students ADD COLUMN IF NOT EXISTS archived_at       TIMESTAMP`,
     ];
     for (const q of studentCols) await client.query(q + ';').catch(() => {});
+
+    // ── coach_applications tablosu ──────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS coach_applications (
+        id            SERIAL PRIMARY KEY,
+        name          VARCHAR(100) NOT NULL,
+        surname       VARCHAR(100) NOT NULL,
+        age           INTEGER      NOT NULL,
+        discord       VARCHAR(100) NOT NULL,
+        tracker       TEXT         NOT NULL,
+        strong_points TEXT[]       NOT NULL,
+        languages     TEXT         NOT NULL,
+        is_read       BOOLEAN      DEFAULT false,
+        created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
 
     // ── coaches tablosu ─────────────────────────────────────────────────────
     await client.query(`
@@ -319,31 +409,70 @@ app.get('/api/discord/user/:discordId', async (req, res) => {
   }
 });
 
+// ─── DISCORD WEBHOOK BİLDİRİMİ ───────────────────────────────────────────────
+async function sendDiscordWebhook(embed) {
+  if (!DISCORD_WEBHOOK_URL) return;
+  try {
+    await fetch(DISCORD_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ embeds: [embed] })
+    });
+  } catch (e) {
+    console.warn('⚠️  Discord webhook hatası:', e.message);
+  }
+}
+
 // ─── APPLICATIONS ─────────────────────────────────────────────────────────────
-app.get('/api/applications', async (req, res) => {
+app.get('/api/applications', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query('SELECT * FROM applications ORDER BY created_at DESC');
     res.json({ success: true, applications: r.rows });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.post('/api/applications', async (req, res) => {
+app.post('/api/applications', formRateLimiter, async (req, res) => {
   try {
     const {
       name, surname, age, country, rank, targetRank,
       tracker, expectations, introduction, discord, availability
     } = req.body;
+
+    // Temel doğrulama
+    if (!name || !surname || !age || !country || !rank || !targetRank || !discord) {
+      return res.status(400).json({ success: false, error: 'Zorunlu alanlar eksik' });
+    }
+    if (parseInt(age) < 16) {
+      return res.status(400).json({ success: false, error: 'Minimum yaş 16' });
+    }
+
     const r = await pool.query(
       `INSERT INTO applications
          (name,surname,age,country,rank,target_rank,tracker,expectations,introduction,discord,availability)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
       [name, surname, age, country, rank, targetRank, tracker, expectations, introduction, discord, availability]
     );
+
+    // Discord webhook bildirimi
+    await sendDiscordWebhook({
+      title: '🎮 Yeni Koçluk Başvurusu',
+      color: 0x6366f1,
+      fields: [
+        { name: 'İsim', value: `${name} ${surname}`, inline: true },
+        { name: 'Yaş', value: String(age), inline: true },
+        { name: 'Rank', value: `${rank} → ${targetRank}`, inline: true },
+        { name: 'Discord', value: discord, inline: true },
+        { name: 'Ülke', value: country, inline: true },
+      ],
+      timestamp: new Date().toISOString(),
+      footer: { text: 'AURA Coaching — Başvuru Sistemi' }
+    });
+
     res.json({ success: true, application: r.rows[0] });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.put('/api/applications/:id/mark-read', async (req, res) => {
+app.put('/api/applications/:id/mark-read', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query(
       'UPDATE applications SET is_read=true WHERE id=$1 RETURNING *',
@@ -353,9 +482,74 @@ app.put('/api/applications/:id/mark-read', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.delete('/api/applications/:id', async (req, res) => {
+app.delete('/api/applications/:id', requireApiKey, async (req, res) => {
   try {
     await pool.query('DELETE FROM applications WHERE id=$1', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ─── COACH APPLICATIONS ───────────────────────────────────────────────────────
+app.get('/api/coach-applications', requireApiKey, async (req, res) => {
+  try {
+    const r = await pool.query('SELECT * FROM coach_applications ORDER BY created_at DESC');
+    res.json({ success: true, applications: r.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.post('/api/coach-applications', formRateLimiter, async (req, res) => {
+  try {
+    const { name, surname, age, discord, tracker, strongPoints, languages } = req.body;
+
+    if (!name || !surname || !age || !discord || !tracker || !languages) {
+      return res.status(400).json({ success: false, error: 'Zorunlu alanlar eksik' });
+    }
+    if (!Array.isArray(strongPoints) || strongPoints.length === 0) {
+      return res.status(400).json({ success: false, error: 'En az bir güçlü yön seçmelisiniz' });
+    }
+    if (parseInt(age) < 16) {
+      return res.status(400).json({ success: false, error: 'Minimum yaş 16' });
+    }
+
+    const r = await pool.query(
+      `INSERT INTO coach_applications (name, surname, age, discord, tracker, strong_points, languages)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [name, surname, parseInt(age), discord, tracker, strongPoints, languages]
+    );
+
+    // Discord webhook bildirimi
+    await sendDiscordWebhook({
+      title: '🏆 Yeni Koç Başvurusu',
+      color: 0xec4899,
+      fields: [
+        { name: 'İsim', value: `${name} ${surname}`, inline: true },
+        { name: 'Yaş', value: String(age), inline: true },
+        { name: 'Discord', value: discord, inline: true },
+        { name: 'Güçlü Yönler', value: strongPoints.join(', '), inline: true },
+        { name: 'Diller', value: languages, inline: true },
+        { name: 'Tracker', value: tracker },
+      ],
+      timestamp: new Date().toISOString(),
+      footer: { text: 'AURA Coaching — Koç Başvuru Sistemi' }
+    });
+
+    res.json({ success: true, application: r.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.put('/api/coach-applications/:id/mark-read', requireApiKey, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'UPDATE coach_applications SET is_read=true WHERE id=$1 RETURNING *',
+      [req.params.id]
+    );
+    res.json({ success: true, application: r.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/coach-applications/:id', requireApiKey, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM coach_applications WHERE id=$1', [req.params.id]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -367,7 +561,7 @@ app.delete('/api/applications/:id', async (req, res) => {
  * Query: ?archived=true  → sadece arşivlenmiş öğrenciler
  *        (parametre yok) → archived=false olanlar (normal liste)
  */
-app.get('/api/students', async (req, res) => {
+app.get('/api/students', requireApiKey, async (req, res) => {
   try {
     const showArchived = req.query.archived === 'true';
     const r = await pool.query(
@@ -386,7 +580,7 @@ app.get('/api/students', async (req, res) => {
  * remaining_lessons, total_lessons ile aynı başlar.
  * archived = false (varsayılan)
  */
-app.post('/api/students', async (req, res) => {
+app.post('/api/students', requireApiKey, async (req, res) => {
   try {
     const {
       name, surname, age, country, rank, targetRank,
@@ -424,7 +618,7 @@ app.post('/api/students', async (req, res) => {
  * archived=false → archived_at=NULL
  * remaining_lessons <= 0 → is_active=false (otomatik pasife alma)
  */
-app.put('/api/students/:id', async (req, res) => {
+app.put('/api/students/:id', requireApiKey, async (req, res) => {
   try {
     const {
       weeklySchedule, totalLessons, remainingLessons,
@@ -494,7 +688,7 @@ app.put('/api/students/:id', async (req, res) => {
  * is_active durumunu değiştirir.
  * Aktifleştirirken ders paketi de güncellenir.
  */
-app.put('/api/students/:id/toggle-active', async (req, res) => {
+app.put('/api/students/:id/toggle-active', requireApiKey, async (req, res) => {
   try {
     const { isActive, totalLessons, weeklyLessons } = req.body;
     let r;
@@ -527,7 +721,7 @@ app.put('/api/students/:id/toggle-active', async (req, res) => {
  * Kalıcı silme — frontend artık arşivleme kullanıyor.
  * Sadece "Arşiv" ekranındaki "Kalıcı Sil" butonu bu endpoint'i çağırır.
  */
-app.delete('/api/students/:id', async (req, res) => {
+app.delete('/api/students/:id', requireApiKey, async (req, res) => {
   try {
     await pool.query('DELETE FROM students WHERE id=$1', [req.params.id]);
     res.json({ success: true });
@@ -535,14 +729,14 @@ app.delete('/api/students/:id', async (req, res) => {
 });
 
 // ─── COACHES ──────────────────────────────────────────────────────────────────
-app.get('/api/coaches', async (req, res) => {
+app.get('/api/coaches', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query('SELECT * FROM coaches ORDER BY created_at DESC');
     res.json({ success: true, coaches: r.rows });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.post('/api/coaches', async (req, res) => {
+app.post('/api/coaches', requireApiKey, async (req, res) => {
   try {
     const { name, surname, username, specialty, contact } = req.body;
     const r = await pool.query(
@@ -554,7 +748,7 @@ app.post('/api/coaches', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.put('/api/coaches/:id', async (req, res) => {
+app.put('/api/coaches/:id', requireApiKey, async (req, res) => {
   try {
     const { name, surname, username, specialty, contact } = req.body;
     const r = await pool.query(
@@ -566,7 +760,7 @@ app.put('/api/coaches/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.delete('/api/coaches/:id', async (req, res) => {
+app.delete('/api/coaches/:id', requireApiKey, async (req, res) => {
   try {
     await pool.query('DELETE FROM coaches WHERE id=$1', [req.params.id]);
     res.json({ success: true });
@@ -574,7 +768,7 @@ app.delete('/api/coaches/:id', async (req, res) => {
 });
 
 // ─── LESSON TYPES ─────────────────────────────────────────────────────────────
-app.get('/api/lesson-types', async (req, res) => {
+app.get('/api/lesson-types', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query(
       'SELECT * FROM lesson_types ORDER BY is_default DESC, name ASC'
@@ -583,7 +777,7 @@ app.get('/api/lesson-types', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.post('/api/lesson-types', async (req, res) => {
+app.post('/api/lesson-types', requireApiKey, async (req, res) => {
   try {
     const { name, color } = req.body;
     const r = await pool.query(
@@ -600,7 +794,7 @@ app.post('/api/lesson-types', async (req, res) => {
   }
 });
 
-app.delete('/api/lesson-types/:id', async (req, res) => {
+app.delete('/api/lesson-types/:id', requireApiKey, async (req, res) => {
   try {
     const check = await pool.query(
       'SELECT is_default FROM lesson_types WHERE id=$1', [req.params.id]
@@ -616,7 +810,7 @@ app.delete('/api/lesson-types/:id', async (req, res) => {
 
 // ─── BOT API — MongoDB (salt okunur) ─────────────────────────────────────────
 
-app.get('/api/bot/students', async (req, res) => {
+app.get('/api/bot/students', requireApiKey, async (req, res) => {
   if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
     const s = await BotStudent.find({}).sort({ totalLessons: -1 });
@@ -624,7 +818,7 @@ app.get('/api/bot/students', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.get('/api/bot/students/:discordId', async (req, res) => {
+app.get('/api/bot/students/:discordId', requireApiKey, async (req, res) => {
   if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
     const s = await BotStudent.findOne({ discordId: req.params.discordId });
@@ -637,7 +831,7 @@ app.get('/api/bot/students/:discordId', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.get('/api/bot/lessons', async (req, res) => {
+app.get('/api/bot/lessons', requireApiKey, async (req, res) => {
   if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
     const page  = parseInt(req.query.page)  || 1;
@@ -649,7 +843,7 @@ app.get('/api/bot/lessons', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.get('/api/bot/stats', async (req, res) => {
+app.get('/api/bot/stats', requireApiKey, async (req, res) => {
   if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
     const today = new Date().toISOString().split('T')[0];
@@ -703,7 +897,7 @@ app.get('/api/bot/stats', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.get('/api/bot/match/:discord', async (req, res) => {
+app.get('/api/bot/match/:discord', requireApiKey, async (req, res) => {
   if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
     const s = await BotStudent.findOne({
@@ -731,7 +925,7 @@ app.get('/', (req, res) => {
 });
 
 // Manuel rapor tetikleyici (test için)
-app.post('/api/send-test-report', async (req, res) => {
+app.post('/api/send-test-report', requireApiKey, async (req, res) => {
   try {
     await sendDataReport();
     res.json({ success: true });
@@ -744,50 +938,50 @@ app.post('/api/send-test-report', async (req, res) => {
 async function sendDataReport() {
   try {
     const client = await pool.connect();
-    const [apps, studs, coachs] = await Promise.all([
+    const [apps, studs, coachs, coachApps] = await Promise.all([
       client.query('SELECT * FROM applications ORDER BY created_at DESC'),
       client.query('SELECT * FROM students     ORDER BY created_at DESC'),
       client.query('SELECT * FROM coaches      ORDER BY created_at DESC'),
+      client.query('SELECT * FROM coach_applications ORDER BY created_at DESC'),
     ]);
     client.release();
 
-    const activeCount   = studs.rows.filter(s => s.is_active && !s.archived).length;
-    const archivedCount = studs.rows.filter(s => s.archived).length;
-    const totalWeekly   = studs.rows
+    const activeCount    = studs.rows.filter(s => s.is_active && !s.archived).length;
+    const archivedCount  = studs.rows.filter(s => s.archived).length;
+    const unreadApps     = apps.rows.filter(a => !a.is_read).length;
+    const unreadCoachApps = coachApps.rows.filter(a => !a.is_read).length;
+    const totalWeekly    = studs.rows
       .filter(s => s.is_active && !s.archived)
       .reduce((sum, s) => sum + (parseInt(s.weekly_lessons) || 0), 0);
 
-    const emailHTML = `
-      <!DOCTYPE html>
-      <html>
-      <body style="font-family:sans-serif;background:#0a0e27;color:#fff;padding:30px;">
-        <h1 style="color:#6366f1;">AURA Coaching — Özet Rapor</h1>
-        <p>Tarih: ${new Date().toLocaleDateString('tr-TR')}</p>
-        <ul>
-          <li>Aktif Öğrenci: <strong>${activeCount}</strong></li>
-          <li>Arşivlenen: <strong>${archivedCount}</strong></li>
-          <li>Bekleyen Başvuru: <strong>${apps.rows.length}</strong></li>
-          <li>Koç Sayısı: <strong>${coachs.rows.length}</strong></li>
-          <li>Toplam Haftalık Ders: <strong>${totalWeekly}</strong></li>
-        </ul>
-      </body>
-      </html>
-    `;
+    if (!DISCORD_WEBHOOK_URL) {
+      console.log('⚠️  DISCORD_WEBHOOK_URL tanımlı değil, rapor atlandı.');
+      return;
+    }
 
-    const formData = new URLSearchParams({
-      '_subject':  `AURA Coaching Rapor — ${new Date().toLocaleDateString('tr-TR')}`,
-      '_template': 'box',
-      '_captcha':  'false',
-      '_html':     emailHTML
+    await fetch(DISCORD_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        embeds: [{
+          title: `📊 AURA Coaching — 3 Günlük Özet Rapor`,
+          color: 0x6366f1,
+          description: `**Tarih:** ${new Date().toLocaleDateString('tr-TR')}`,
+          fields: [
+            { name: '👥 Aktif Öğrenci',        value: String(activeCount),       inline: true },
+            { name: '📦 Arşivlenen',            value: String(archivedCount),     inline: true },
+            { name: '📚 Haftalık Toplam Ders',  value: String(totalWeekly),       inline: true },
+            { name: '📋 Bekleyen Öğrenci Başvurusu', value: String(unreadApps),  inline: true },
+            { name: '🏆 Bekleyen Koç Başvurusu', value: String(unreadCoachApps), inline: true },
+            { name: '🎓 Toplam Koç',            value: String(coachs.rows.length), inline: true },
+          ],
+          timestamp: new Date().toISOString(),
+          footer: { text: 'AURA Coaching — Otomatik Rapor Sistemi' }
+        }]
+      })
     });
 
-    await fetch('https://formsubmit.co/basvurukocluk@gmail.com', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body:    formData
-    });
-
-    console.log('✅ Otomatik rapor gönderildi.');
+    console.log('✅ Otomatik rapor Discord\'a gönderildi.');
   } catch (e) {
     console.error('❌ Rapor gönderme hatası:', e.message);
   }
