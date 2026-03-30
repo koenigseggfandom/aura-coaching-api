@@ -206,7 +206,6 @@ async function initDatabase() {
         weekly_lessons    INTEGER   DEFAULT 1,
         archived          BOOLEAN   DEFAULT false,
         archived_at       TIMESTAMP,
-        availability      TEXT,
         created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -218,7 +217,6 @@ async function initDatabase() {
       `ALTER TABLE students ADD COLUMN IF NOT EXISTS weekly_lessons    INTEGER   DEFAULT 1`,
       `ALTER TABLE students ADD COLUMN IF NOT EXISTS archived          BOOLEAN   DEFAULT false`,
       `ALTER TABLE students ADD COLUMN IF NOT EXISTS archived_at       TIMESTAMP`,
-      `ALTER TABLE students ADD COLUMN IF NOT EXISTS availability      TEXT`,
     ];
     for (const q of studentCols) await client.query(q + ';').catch(() => {});
 
@@ -625,6 +623,7 @@ app.put('/api/students/:id', requireApiKey, async (req, res) => {
     if (expectations !== undefined) { updates.push(`expectations=$${idx++}`);values.push(expectations); }
     if (introduction !== undefined) { updates.push(`introduction=$${idx++}`);values.push(introduction); }
     if (discord      !== undefined) { updates.push(`discord=$${idx++}`);     values.push(discord); }
+
     if (weeklySchedule   !== undefined) {
       updates.push(`weekly_schedule=$${idx++}`);
       values.push(JSON.stringify(weeklySchedule));
