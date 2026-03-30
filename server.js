@@ -206,6 +206,7 @@ async function initDatabase() {
         weekly_lessons    INTEGER   DEFAULT 1,
         archived          BOOLEAN   DEFAULT false,
         archived_at       TIMESTAMP,
+        availability      TEXT,
         created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -217,6 +218,7 @@ async function initDatabase() {
       `ALTER TABLE students ADD COLUMN IF NOT EXISTS weekly_lessons    INTEGER   DEFAULT 1`,
       `ALTER TABLE students ADD COLUMN IF NOT EXISTS archived          BOOLEAN   DEFAULT false`,
       `ALTER TABLE students ADD COLUMN IF NOT EXISTS archived_at       TIMESTAMP`,
+      `ALTER TABLE students ADD COLUMN IF NOT EXISTS availability      TEXT`,
     ];
     for (const q of studentCols) await client.query(q + ';').catch(() => {});
 
@@ -532,6 +534,29 @@ app.delete('/api/coach-applications/:id', requireApiKey, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// ─── KOÇ BAŞVURUSUNDAN KOÇ OLARAK EKLE ──────────────────────────────────────
+app.post('/api/coach-applications/:id/promote', requireApiKey, async (req, res) => {
+  try {
+    const appRes = await pool.query('SELECT * FROM coach_applications WHERE id=$1', [req.params.id]);
+    if (!appRes.rows.length) return res.status(404).json({ success: false, error: 'Başvuru bulunamadı' });
+    const app = appRes.rows[0];
+    const { specialty, contact, username } = req.body;
+    const coachRes = await pool.query(
+      `INSERT INTO coaches (name, surname, username, specialty, contact)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [
+        app.name,
+        app.surname,
+        username || app.discord,
+        specialty || (Array.isArray(app.strong_points) ? app.strong_points.join(', ') : app.strong_points),
+        contact   || app.discord
+      ]
+    );
+    await pool.query('DELETE FROM coach_applications WHERE id=$1', [req.params.id]);
+    res.json({ success: true, coach: coachRes.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 // ─── STUDENTS ─────────────────────────────────────────────────────────────────
 app.get('/api/students', requireApiKey, async (req, res) => {
   try {
@@ -580,6 +605,8 @@ app.post('/api/students', requireApiKey, async (req, res) => {
 app.put('/api/students/:id', requireApiKey, async (req, res) => {
   try {
     const {
+      name, surname, age, country, rank, targetRank,
+      tracker, expectations, introduction, discord,
       weeklySchedule, totalLessons, remainingLessons,
       weeklyLessons, isActive, archived
     } = req.body;
@@ -588,6 +615,16 @@ app.put('/api/students/:id', requireApiKey, async (req, res) => {
     const values  = [];
     let idx = 1;
 
+    if (name         !== undefined) { updates.push(`name=$${idx++}`);       values.push(name); }
+    if (surname      !== undefined) { updates.push(`surname=$${idx++}`);     values.push(surname); }
+    if (age          !== undefined) { updates.push(`age=$${idx++}`);         values.push(parseInt(age)); }
+    if (country      !== undefined) { updates.push(`country=$${idx++}`);     values.push(country); }
+    if (rank         !== undefined) { updates.push(`rank=$${idx++}`);        values.push(rank); }
+    if (targetRank   !== undefined) { updates.push(`target_rank=$${idx++}`); values.push(targetRank); }
+    if (tracker      !== undefined) { updates.push(`tracker=$${idx++}`);     values.push(tracker); }
+    if (expectations !== undefined) { updates.push(`expectations=$${idx++}`);values.push(expectations); }
+    if (introduction !== undefined) { updates.push(`introduction=$${idx++}`);values.push(introduction); }
+    if (discord      !== undefined) { updates.push(`discord=$${idx++}`);     values.push(discord); }
     if (weeklySchedule   !== undefined) {
       updates.push(`weekly_schedule=$${idx++}`);
       values.push(JSON.stringify(weeklySchedule));
@@ -933,6 +970,25 @@ async function sendDataReport() {
 
 // Her 3 günde bir gece yarısı çalışır
 cron.schedule('0 0 */3 * *', () => sendDataReport());
+
+// ─── 90 GÜN SONRA OTOMATİK SİLME (her gün gece yarısı) ─────────────────────
+cron.schedule('0 0 * * *', async () => {
+  try {
+    const result = await pool.query(
+      `DELETE FROM applications WHERE created_at < NOW() - INTERVAL '90 days' RETURNING id`
+    );
+    const coachResult = await pool.query(
+      `DELETE FROM coach_applications WHERE created_at < NOW() - INTERVAL '90 days' RETURNING id`
+    );
+    const deletedApps  = result.rows.length;
+    const deletedCoach = coachResult.rows.length;
+    if (deletedApps > 0 || deletedCoach > 0) {
+      console.log(`🗑️  Otomatik temizleme: ${deletedApps} başvuru, ${deletedCoach} koç başvurusu silindi (90 gün geçti).`);
+    }
+  } catch (e) {
+    console.error('❌ Otomatik silme hatası:', e.message);
+  }
+});
 
 // ─── SUNUCU BAŞLAT ────────────────────────────────────────────────────────────
 app.listen(PORT, async () => {
