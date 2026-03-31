@@ -220,6 +220,9 @@ async function initDatabase() {
     ];
     for (const q of studentCols) await client.query(q + ';').catch(() => {});
 
+    // students tablosuna availability sütunu ekle
+    await client.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS availability TEXT;`).catch(() => {});
+
     // ── coach_applications tablosu ──────────────────────────────────────────
     await client.query(`
       CREATE TABLE IF NOT EXISTS coach_applications (
@@ -574,7 +577,8 @@ app.post('/api/students', requireApiKey, async (req, res) => {
     const {
       name, surname, age, country, rank, targetRank,
       tracker, expectations, introduction, discord,
-      weeklySchedule, totalLessons, weeklyLessons
+      weeklySchedule, totalLessons, weeklyLessons,
+      availability   // 👈 YENİ
     } = req.body;
 
     const tl = parseInt(totalLessons)  || 0;
@@ -586,14 +590,15 @@ app.post('/api/students', requireApiKey, async (req, res) => {
           tracker, expectations, introduction, discord,
           weekly_schedule, is_active,
           total_lessons, remaining_lessons, weekly_lessons,
-          archived)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$12,$13,false)
+          archived, availability)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$12,$13,false,$14)
        RETURNING *`,
       [
         name, surname, age, country, rank, targetRank,
         tracker, expectations, introduction, discord,
         JSON.stringify(weeklySchedule || {}),
-        tl, wl
+        tl, wl,
+        availability   // 👈 YENİ
       ]
     );
     res.json({ success: true, student: r.rows[0], studentId: r.rows[0].id });
@@ -606,7 +611,8 @@ app.put('/api/students/:id', requireApiKey, async (req, res) => {
       name, surname, age, country, rank, targetRank,
       tracker, expectations, introduction, discord,
       weeklySchedule, totalLessons, remainingLessons,
-      weeklyLessons, isActive, archived
+      weeklyLessons, isActive, archived,
+      availability   // 👈 YENİ
     } = req.body;
 
     const updates = [];
@@ -657,6 +663,10 @@ app.put('/api/students/:id', requireApiKey, async (req, res) => {
       } else {
         updates.push(`archived_at=NULL`);
       }
+    }
+    if (availability     !== undefined) {
+      updates.push(`availability=$${idx++}`);
+      values.push(availability);
     }
 
     if (!updates.length) {
