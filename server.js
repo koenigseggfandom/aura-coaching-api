@@ -625,6 +625,8 @@ app.post('/api/students', requireApiKey, async (req, res) => {
     }
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
+
+app.put('/api/students/:id', requireApiKey, async (req, res) => {
   try {
     const {
       name, surname, age, country, rank, targetRank,
