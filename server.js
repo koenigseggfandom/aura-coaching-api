@@ -601,7 +601,34 @@ app.post('/api/students', requireApiKey, async (req, res) => {
         availability   // 👈 YENİ
       ]
     );
-    res.json({ success: true, student: r.rows[0], studentId: r.rows[0].id });
+    const newStudent = r.rows[0];
+
+    // Yeni bot icin AutoRegisterQueue'ya ekle (discord bilgisi varsa)
+    if (discord || name) {
+      try {
+        // discord alani username veya ID olabilir
+        const isDiscordId = discord && /^\d{15,20}$/.test(discord.trim());
+        await pool.query(
+          `INSERT INTO auto_register_queue
+             (name, surname, "discordTag", "discordId", "packageType", rank, "targetRank", processed)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, false)
+           ON CONFLICT DO NOTHING`,
+          [
+            name, surname,
+            isDiscordId ? null : (discord || null),
+            isDiscordId ? discord : null,
+            tl > 0 ? `${tl} Ders` : null,
+            rank || null,
+            targetRank || null,
+          ]
+        );
+        console.log(`[AUTO-REG-QUEUE] Added to queue: ${name} ${surname}`);
+      } catch (qErr) {
+        console.warn('[AUTO-REG-QUEUE] Queue insert failed:', qErr.message);
+      }
+    }
+
+    res.json({ success: true, student: newStudent, studentId: newStudent.id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
@@ -802,107 +829,130 @@ app.delete('/api/lesson-types/:id', requireApiKey, async (req, res) => {
 
 // ─── BOT API — MongoDB (salt okunur) ─────────────────────────────────────────
 
+// ─── ESKİ BOT ENDPOINTLERİ — Yeni PostgreSQL tablolarına yonlendirildi ────────
+
 app.get('/api/bot/students', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
-    const s = await BotStudent.find({}).sort({ totalLessons: -1 });
-    res.json({ success: true, students: s });
+    const page  = parseInt(req.query.page)  || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = (page - 1) * limit;
+    const result = await pool.query(
+      `SELECT *, (total_lessons - remaining_lessons) as completed_lessons
+       FROM students WHERE archived = false
+       ORDER BY registered_at DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+    // Yeni bot kayitlilari da ekle (students tablosundan)
+    let botStudents = [];
+    try {
+      const bs = await pool.query('SELECT * FROM students ORDER BY "registeredAt" DESC LIMIT $1 OFFSET $2', [limit, offset]);
+      botStudents = bs.rows;
+    } catch(e) {}
+    res.json({ success: true, students: botStudents.length ? botStudents : result.rows });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 app.get('/api/bot/students/:discordId', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
-    const s = await BotStudent.findOne({ discordId: req.params.discordId });
-    if (!s) return res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
-    const l = await BotLesson
-      .find({ studentId: req.params.discordId })
-      .sort({ date: -1, lessonSequence: -1 })
-      .limit(20);
-    res.json({ success: true, student: s, lessons: l });
+    const s = await pool.query('SELECT * FROM students WHERE "discordId" = $1', [req.params.discordId]);
+    if (!s.rows.length) return res.status(404).json({ success: false, error: 'Ogrenci bulunamadi' });
+    const student = s.rows[0];
+    const lessons = await pool.query(
+      'SELECT * FROM lessons WHERE "studentId" = $1 ORDER BY "lessonNumber" DESC LIMIT 20',
+      [student.id]
+    );
+    const lessonsMapped = lessons.rows.map(l => ({
+      ...l,
+      date: new Date(l.createdAt).toISOString().split('T')[0],
+      instructorId: l.coachId,
+    }));
+    res.json({
+      success: true,
+      student: { ...student, totalLessons: student.totalLessons || 0, lastLessonDate: lessons.rows[0] ? new Date(lessons.rows[0].createdAt).toLocaleDateString('tr-TR') : null },
+      lessons: lessonsMapped,
+    });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 app.get('/api/bot/lessons', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
     const page  = parseInt(req.query.page)  || 1;
     const limit = parseInt(req.query.limit) || 50;
-    const skip  = (page - 1) * limit;
-    const total = await BotLesson.countDocuments({});
-    const lessons = await BotLesson.find({}).sort({ timestamp: -1 }).skip(skip).limit(limit);
-    res.json({ success: true, lessons, total, page, totalPages: Math.ceil(total / limit) });
+    const offset = (page - 1) * limit;
+    const [rows, countRes] = await Promise.all([
+      pool.query(`SELECT l.*, s.name as "studentName", s.surname as "studentSurname" FROM lessons l LEFT JOIN students s ON s.id = l."studentId" ORDER BY l."createdAt" DESC LIMIT $1 OFFSET $2`, [limit, offset]),
+      pool.query('SELECT COUNT(*) FROM lessons'),
+    ]);
+    res.json({ success: true, lessons: rows.rows, total: parseInt(countRes.rows[0].count), page, totalPages: Math.ceil(parseInt(countRes.rows[0].count) / limit) });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 app.get('/api/bot/stats', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
     const today = new Date().toISOString().split('T')[0];
-
-    const [totalStudents, totalLessons, todayLessons, topStudent] = await Promise.all([
-      BotStudent.countDocuments({}),
-      BotLesson.countDocuments({}),
-      BotLesson.countDocuments({ date: today }),
-      BotStudent.findOne({}).sort({ totalLessons: -1 }),
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const [totalStudents, totalLessons, monthLessons, catRes] = await Promise.all([
+      pool.query('SELECT COUNT(*) FROM students WHERE "isActive" = true'),
+      pool.query('SELECT COUNT(*) FROM lessons'),
+      pool.query('SELECT COUNT(*) FROM lessons WHERE "createdAt" >= $1', [monthStart]),
+      pool.query('SELECT category, COUNT(*) as count FROM lessons GROUP BY category'),
     ]);
-
-    const dates = [];
-    for (let i = 6; i >= 0; i--) {
-      dates.push(new Date(Date.now() - i * 86400000).toISOString().split('T')[0]);
-    }
-
-    const recentLessons = await BotLesson.find(
-      { date: { $gte: dates[0] } },
-      { date: 1, instructorId: 1, category: 1 }
-    );
-
-    const last7Map      = new Map(dates.map(d => [d, 0]));
-    const instructorMap = new Map();
-    const categoryMap   = new Map();
-
-    for (const l of recentLessons) {
-      if (last7Map.has(l.date)) last7Map.set(l.date, last7Map.get(l.date) + 1);
-      instructorMap.set(l.instructorId, (instructorMap.get(l.instructorId) || 0) + 1);
-      if (l.category) categoryMap.set(l.category, (categoryMap.get(l.category) || 0) + 1);
-    }
-
-    const last7Days      = dates.map(d => ({ date: d, count: last7Map.get(d) || 0 }));
-    const topInstructors = [...instructorMap.entries()]
-      .sort((a, b) => b[1] - a[1]).slice(0, 5)
-      .map(([id, count]) => ({ id, count }));
-    const topCategories  = [...categoryMap.entries()]
-      .sort((a, b) => b[1] - a[1]).slice(0, 5)
-      .map(([cat, count]) => ({ cat, count }));
-
+    const categoryMap = {};
+    catRes.rows.forEach(r => { categoryMap[r.category] = parseInt(r.count); });
     res.json({
       success: true,
       stats: {
-        totalStudents, totalLessons, todayLessons,
-        topStudent: topStudent
-          ? { name: topStudent.name, totalLessons: topStudent.totalLessons }
-          : null,
-        last7Days, topInstructors, topCategories
+        totalStudents: parseInt(totalStudents.rows[0].count),
+        totalLessons: parseInt(totalLessons.rows[0].count),
+        todayLessons: parseInt(monthLessons.rows[0].count),
+        topCategories: Object.entries(categoryMap).sort((a,b) => b[1]-a[1]).slice(0,5).map(([cat,count]) => ({ cat, count })),
       }
     });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 app.get('/api/bot/match/:discord', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
   try {
-    const s = await BotStudent.findOne({
-      $or: [
-        { discordId: req.params.discord },
-        { name: { $regex: req.params.discord, $options: 'i' } }
-      ]
-    });
-    if (!s) return res.json({ success: false, error: 'Bulunamadı' });
-    const l = await BotLesson
-      .find({ studentId: s.discordId })
-      .sort({ timestamp: -1 })
-      .limit(20);
-    res.json({ success: true, student: s, lessons: l });
+    const d = req.params.discord;
+    const result = await pool.query(
+      `SELECT * FROM students WHERE "discordId" = $1 OR "discordUsername" ILIKE $2 LIMIT 1`,
+      [d, `%${d}%`]
+    );
+    if (!result.rows.length) return res.json({ success: false, error: 'Bulunamadi' });
+    res.json({ success: true, student: result.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Mevcut tum ogrencileri AutoRegisterQueue'ya ekle (tek seferlik toplu islem)
+// GET /api/discord/sync-existing
+app.post('/api/discord/sync-existing', requireApiKey, async (req, res) => {
+  try {
+    // Eski students tablosundan discord bilgisi olanlari al
+    const existing = await pool.query(
+      `SELECT name, surname, discord, rank, target_rank, total_lessons
+       FROM students WHERE archived = false AND discord IS NOT NULL AND discord != ''`
+    );
+    let added = 0;
+    for (const s of existing.rows) {
+      const isId = /^\d{15,20}$/.test((s.discord || '').trim());
+      try {
+        await pool.query(
+          `INSERT INTO auto_register_queue
+             (name, surname, "discordTag", "discordId", "packageType", rank, "targetRank", processed)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, false)`,
+          [
+            s.name, s.surname,
+            isId ? null : s.discord,
+            isId ? s.discord : null,
+            s.total_lessons > 0 ? `${s.total_lessons} Ders` : null,
+            s.rank || null,
+            s.target_rank || null,
+          ]
+        );
+        added++;
+      } catch(e) { /* zaten eklenmis olabilir */ }
+    }
+    res.json({ success: true, message: `${added} ogrenci kuyruga eklendi`, total: existing.rows.length });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
