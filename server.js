@@ -906,6 +906,235 @@ app.get('/api/bot/match/:discord', requireApiKey, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// ─── DISCORD BOT ENTEGRASYONu (Yeni Bot — Shared PostgreSQL) ─────────────────
+
+// Bot Heartbeat — bot her 60sn'de bir bu tabloyu günceller
+// GET /api/discord/heartbeat
+app.get('/api/discord/heartbeat', requireApiKey, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM bot_heartbeat WHERE id = $1', ['singleton']);
+    if (!result.rows.length) return res.json({ success: false, error: 'Heartbeat kaydı yok' });
+    res.json({ success: true, ...result.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Discord Genel İstatistikler
+// GET /api/discord/stats
+app.get('/api/discord/stats', requireApiKey, async (req, res) => {
+  try {
+    const client = await pool.connect();
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [studentsRes, monthLessonsRes, activeSessionsRes, lowLessonsRes, categoriesRes, lowStudentsRes] = await Promise.all([
+      client.query('SELECT COUNT(*) FROM students WHERE "isActive" = true'),
+      client.query('SELECT COUNT(*) FROM lessons WHERE "createdAt" >= $1', [monthStart]),
+      client.query('SELECT COUNT(*) FROM voice_sessions WHERE "isActive" = true'),
+      client.query('SELECT COUNT(*) FROM students WHERE "remainingLessons" <= 3 AND "isActive" = true'),
+      client.query(`SELECT category, COUNT(*) as count FROM lessons WHERE "createdAt" >= $1 GROUP BY category`, [monthStart]),
+      client.query(`SELECT name, surname, "discordId", "remainingLessons" FROM students WHERE "remainingLessons" <= 3 AND "isActive" = true ORDER BY "remainingLessons" ASC LIMIT 10`),
+    ]);
+    client.release();
+
+    const categories = {};
+    categoriesRes.rows.forEach(r => { categories[r.category] = parseInt(r.count); });
+
+    res.json({
+      success: true,
+      totalStudents: parseInt(studentsRes.rows[0].count),
+      monthLessons: parseInt(monthLessonsRes.rows[0].count),
+      activeSessions: parseInt(activeSessionsRes.rows[0].count),
+      lowLessons: parseInt(lowLessonsRes.rows[0].count),
+      categories,
+      lowLessonStudents: lowStudentsRes.rows,
+    });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Son 10 Ders
+// GET /api/discord/lessons/recent
+app.get('/api/discord/lessons/recent', requireApiKey, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT l.*, s.name as "studentName", s.surname as "studentSurname"
+      FROM lessons l
+      LEFT JOIN students s ON s.id = l."studentId"
+      ORDER BY l."createdAt" DESC
+      LIMIT 10
+    `);
+    res.json({ success: true, lessons: result.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Tüm Bot Öğrencileri
+// GET /api/discord/students
+app.get('/api/discord/students', requireApiKey, async (req, res) => {
+  try {
+    const { search, filter, page = 1, limit = 20 } = req.query;
+    let where = [];
+    let params = [];
+    let idx = 1;
+
+    if (filter === 'aktif') { where.push(`"isActive" = true`); }
+    else if (filter === 'pasif') { where.push(`"isActive" = false`); }
+    else if (filter === 'bitmek_uzere') { where.push(`"remainingLessons" <= 3 AND "isActive" = true`); }
+
+    if (search) {
+      where.push(`(name ILIKE $${idx} OR surname ILIKE $${idx} OR "discordUsername" ILIKE $${idx})`);
+      params.push(`%${search}%`); idx++;
+    }
+
+    const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    const [rows, countRes] = await Promise.all([
+      pool.query(`SELECT * FROM students ${whereClause} ORDER BY "registeredAt" DESC LIMIT $${idx} OFFSET $${idx+1}`, [...params, limit, offset]),
+      pool.query(`SELECT COUNT(*) FROM students ${whereClause}`, params),
+    ]);
+
+    res.json({ success: true, students: rows.rows, total: parseInt(countRes.rows[0].count), page: parseInt(page) });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Tek Öğrenci Detay
+// GET /api/discord/students/:id
+app.get('/api/discord/students/:id', requireApiKey, async (req, res) => {
+  try {
+    const client = await pool.connect();
+    const [studentRes, lessonsRes] = await Promise.all([
+      client.query('SELECT * FROM students WHERE id = $1', [req.params.id]),
+      client.query('SELECT * FROM lessons WHERE "studentId" = $1 ORDER BY "lessonNumber" DESC LIMIT 20', [req.params.id]),
+    ]);
+    client.release();
+    if (!studentRes.rows.length) return res.status(404).json({ success: false, error: 'Bulunamadı' });
+    res.json({ success: true, student: studentRes.rows[0], lessons: lessonsRes.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Öğrenci Güncelle
+// PUT /api/discord/students/:id
+app.put('/api/discord/students/:id', requireApiKey, async (req, res) => {
+  try {
+    const allowed = ['name', 'surname', 'rank', 'targetRank', 'packageType', 'remainingLessons', 'totalLessons', 'isActive', 'country', 'trackerLink'];
+    const fields = Object.keys(req.body).filter(k => allowed.includes(k));
+    if (!fields.length) return res.status(400).json({ success: false, error: 'Güncellenecek alan yok' });
+    const setClause = fields.map((f, i) => `"${f}" = $${i+2}`).join(', ');
+    const values = fields.map(f => req.body[f]);
+    await pool.query(`UPDATE students SET ${setClause}, "updatedAt" = NOW() WHERE id = $1`, [req.params.id, ...values]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Öğrenci Sil
+// DELETE /api/discord/students/:id
+app.delete('/api/discord/students/:id', requireApiKey, async (req, res) => {
+  try {
+    const client = await pool.connect();
+    await client.query('DELETE FROM lessons WHERE "studentId" = $1', [req.params.id]);
+    await client.query('DELETE FROM voice_sessions WHERE "studentId" = $1', [req.params.id]);
+    await client.query('DELETE FROM students WHERE id = $1', [req.params.id]);
+    client.release();
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Tüm Dersler (filtreli)
+// GET /api/discord/lessons
+app.get('/api/discord/lessons', requireApiKey, async (req, res) => {
+  try {
+    const { category, studentId, coachId, auto, page = 1, limit = 50 } = req.query;
+    let where = [];
+    let params = [];
+    let idx = 1;
+
+    if (category) { where.push(`l.category = $${idx++}`); params.push(category); }
+    if (studentId) { where.push(`l."studentId" = $${idx++}`); params.push(studentId); }
+    if (coachId) { where.push(`l."coachId" = $${idx++}`); params.push(coachId); }
+    if (auto === 'true') { where.push(`l."isAutomatic" = true`); }
+    else if (auto === 'false') { where.push(`l."isAutomatic" = false`); }
+
+    const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    const result = await pool.query(`
+      SELECT l.*, s.name as "studentName", s.surname as "studentSurname"
+      FROM lessons l
+      LEFT JOIN students s ON s.id = l."studentId"
+      ${whereClause}
+      ORDER BY l."createdAt" DESC
+      LIMIT $${idx} OFFSET $${idx+1}
+    `, [...params, limit, offset]);
+
+    const countRes = await pool.query(`SELECT COUNT(*) FROM lessons l ${whereClause}`, params);
+    res.json({ success: true, lessons: result.rows, total: parseInt(countRes.rows[0].count) });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Ders Sil
+// DELETE /api/discord/lessons/:id
+app.delete('/api/discord/lessons/:id', requireApiKey, async (req, res) => {
+  try {
+    const lesson = await pool.query('SELECT * FROM lessons WHERE id = $1', [req.params.id]);
+    if (!lesson.rows.length) return res.status(404).json({ success: false, error: 'Ders bulunamadı' });
+    await pool.query('DELETE FROM lessons WHERE id = $1', [req.params.id]);
+    // Öğrenci sayacını geri al
+    await pool.query(`UPDATE students SET "totalLessons" = GREATEST(0, "totalLessons" - 1), "remainingLessons" = "remainingLessons" + 1 WHERE id = $1`, [lesson.rows[0].studentId]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// AutoRegisterQueue — Listele
+// GET /api/discord/queue
+app.get('/api/discord/queue', requireApiKey, async (req, res) => {
+  try {
+    const { filter = 'all' } = req.query;
+    let where = '';
+    if (filter === 'pending') where = 'WHERE processed = false';
+    else if (filter === 'done') where = 'WHERE processed = true';
+    const result = await pool.query(`SELECT * FROM auto_register_queue ${where} ORDER BY "createdAt" DESC LIMIT 100`);
+    res.json({ success: true, queue: result.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// AutoRegisterQueue — Ekle
+// POST /api/discord/queue
+app.post('/api/discord/queue', requireApiKey, async (req, res) => {
+  try {
+    const { name, surname, discordTag, discordId, packageType, rank, targetRank } = req.body;
+    if (!name || !surname) return res.status(400).json({ success: false, error: 'Ad ve soyad zorunludur' });
+    const result = await pool.query(
+      `INSERT INTO auto_register_queue (name, surname, "discordTag", "discordId", "packageType", rank, "targetRank", processed)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, false) RETURNING *`,
+      [name, surname, discordTag || null, discordId || null, packageType || null, rank || null, targetRank || null]
+    );
+    res.json({ success: true, entry: result.rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Koç İstatistikleri
+// GET /api/discord/reports/coaches
+app.get('/api/discord/reports/coaches', requireApiKey, async (req, res) => {
+  try {
+    const { period = 'month' } = req.query;
+    let dateFilter = '';
+    if (period === 'week') dateFilter = `AND l."createdAt" >= NOW() - INTERVAL '7 days'`;
+    else if (period === 'month') dateFilter = `AND l."createdAt" >= NOW() - INTERVAL '30 days'`;
+
+    const result = await pool.query(`
+      SELECT l."coachId", l."coachUsername",
+             COUNT(*) as total,
+             COUNT(DISTINCT l."studentId") as students,
+             SUM(l."durationMins") as totalMins
+      FROM lessons l
+      WHERE l."coachId" != 'unknown' ${dateFilter}
+      GROUP BY l."coachId", l."coachUsername"
+      ORDER BY total DESC
+      LIMIT 20
+    `);
+    res.json({ success: true, coaches: result.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 // ─── GENEL ────────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
