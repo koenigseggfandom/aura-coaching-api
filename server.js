@@ -1291,9 +1291,95 @@ app.get('/api/bot/match/:discord', requireApiKey, async (req, res) => {
   }
 });
 
+// ─── GITHUB BACKUP ────────────────────────────────────────────────────────────
+const GITHUB_TOKEN  = process.env.GITHUB_TOKEN  || '';
+const GITHUB_REPO   = process.env.GITHUB_REPO   || '';
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
+
+async function githubRequest(method, path, body) {
+  const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}${path}`, {
+    method,
+    headers: {
+      'Authorization': `Bearer ${GITHUB_TOKEN}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return res.json();
+}
+
+async function saveToGithub(filename, data) {
+  const content = Buffer.from(JSON.stringify(data, null, 2)).toString('base64');
+  const path = `/contents/backups/${filename}`;
+
+  // Dosya var mı kontrol et (SHA gerekli güncelleme için)
+  let sha;
+  try {
+    const existing = await githubRequest('GET', path);
+    if (existing.sha) sha = existing.sha;
+  } catch {}
+
+  const result = await githubRequest('PUT', path, {
+    message: `backup: ${filename} — ${new Date().toISOString()}`,
+    content,
+    branch: GITHUB_BRANCH,
+    ...(sha ? { sha } : {}),
+  });
+
+  if (result.content) {
+    console.log(`[BACKUP] ${filename} kaydedildi`);
+  } else {
+    console.error(`[BACKUP] ${filename} hatası:`, result.message);
+  }
+}
+
+async function runBackup() {
+  if (!GITHUB_TOKEN || !GITHUB_REPO) {
+    console.warn('[BACKUP] GITHUB_TOKEN veya GITHUB_REPO eksik, backup atlanıyor');
+    return;
+  }
+
+  console.log('[BACKUP] Başlıyor...');
+  const timestamp = new Date().toISOString().split('T')[0];
+
+  try {
+    const [students, applications, coaches, coachApps, botStudents, lessons] = await Promise.all([
+      pool.query('SELECT * FROM students ORDER BY created_at DESC').catch(() => ({ rows: [] })),
+      pool.query('SELECT * FROM applications ORDER BY created_at DESC').catch(() => ({ rows: [] })),
+      pool.query('SELECT * FROM coaches ORDER BY created_at DESC').catch(() => ({ rows: [] })),
+      pool.query('SELECT * FROM coach_applications ORDER BY created_at DESC').catch(() => ({ rows: [] })),
+      botPool.query('SELECT * FROM bot_students ORDER BY "registeredAt" DESC').catch(() => ({ rows: [] })),
+      botPool.query('SELECT * FROM lessons ORDER BY "startedAt" DESC').catch(() => ({ rows: [] })),
+    ]);
+
+    await Promise.all([
+      saveToGithub(`${timestamp}_students.json`,          { backup_date: timestamp, count: students.rows.length,     data: students.rows }),
+      saveToGithub(`${timestamp}_applications.json`,      { backup_date: timestamp, count: applications.rows.length, data: applications.rows }),
+      saveToGithub(`${timestamp}_coaches.json`,           { backup_date: timestamp, count: coaches.rows.length,      data: coaches.rows }),
+      saveToGithub(`${timestamp}_coach_applications.json`,{ backup_date: timestamp, count: coachApps.rows.length,    data: coachApps.rows }),
+      saveToGithub(`${timestamp}_bot_students.json`,      { backup_date: timestamp, count: botStudents.rows.length,  data: botStudents.rows }),
+      saveToGithub(`${timestamp}_lessons.json`,           { backup_date: timestamp, count: lessons.rows.length,      data: lessons.rows }),
+    ]);
+
+    console.log('[BACKUP] Tamamlandı!');
+  } catch (e) {
+    console.error('[BACKUP] Genel hata:', e.message);
+  }
+}
+
+// Her gece 00:00'da çalış
+cron.schedule('0 0 * * *', () => {
+  console.log('[BACKUP] Günlük backup başlıyor...');
+  runBackup();
+}, { timezone: 'Europe/Istanbul' });
+
 // ─── SUNUCU BAŞLAT ────────────────────────────────────────────────────────────
 app.listen(PORT, async () => {
   await initDatabase();
   await connectMongo();
   console.log(`🚀 AURA Coaching API çalışıyor! Port: ${PORT}`);
+  // Sunucu başlayınca bir kere backup al
+  runBackup();
 });
