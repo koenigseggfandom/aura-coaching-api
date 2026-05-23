@@ -821,101 +821,7 @@ app.delete('/api/lesson-types/:id', requireApiKey, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// ─── BOT API — MongoDB (salt okunur) ─────────────────────────────────────────
-
-app.get('/api/bot/students', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
-  try {
-    const s = await BotStudent.find({}).sort({ totalLessons: -1 });
-    res.json({ success: true, students: s });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
-
-app.get('/api/bot/students/:discordId', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
-  try {
-    const s = await BotStudent.findOne({ discordId: req.params.discordId });
-    if (!s) return res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
-    const l = await BotLesson
-      .find({ studentId: req.params.discordId })
-      .sort({ date: -1, lessonSequence: -1 })
-      .limit(20);
-    res.json({ success: true, student: s, lessons: l });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
-
-app.get('/api/bot/lessons', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
-  try {
-    const page  = parseInt(req.query.page)  || 1;
-    const limit = parseInt(req.query.limit) || 50;
-    const skip  = (page - 1) * limit;
-    const total = await BotLesson.countDocuments({});
-    const lessons = await BotLesson.find({}).sort({ timestamp: -1 }).skip(skip).limit(limit);
-    res.json({ success: true, lessons, total, page, totalPages: Math.ceil(total / limit) });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
-
-app.get('/api/bot/stats', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
-  try {
-    const today = new Date().toISOString().split('T')[0];
-
-    const [totalStudents, totalLessons, todayLessons, topStudent] = await Promise.all([
-      BotStudent.countDocuments({}),
-      BotLesson.countDocuments({}),
-      BotLesson.countDocuments({ date: today }),
-      BotStudent.findOne({}).sort({ totalLessons: -1 }),
-    ]);
-
-    const dates = [];
-    for (let i = 6; i >= 0; i--) {
-      dates.push(new Date(Date.now() - i * 86400000).toISOString().split('T')[0]);
-    }
-
-    const recentLessons = await BotLesson.find(
-      { date: { $gte: dates[0] } },
-      { date: 1, instructorId: 1, category: 1 }
-    );
-
-    const last7Map      = new Map(dates.map(d => [d, 0]));
-    const instructorMap = new Map();
-    const categoryMap   = new Map();
-
-    for (const l of recentLessons) {
-      if (last7Map.has(l.date)) last7Map.set(l.date, last7Map.get(l.date) + 1);
-      instructorMap.set(l.instructorId, (instructorMap.get(l.instructorId) || 0) + 1);
-      if (l.category) categoryMap.set(l.category, (categoryMap.get(l.category) || 0) + 1);
-    }
-
-    const last7Days      = dates.map(d => ({ date: d, count: last7Map.get(d) || 0 }));
-    const topInstructors = [...instructorMap.entries()]
-      .sort((a, b) => b[1] - a[1]).slice(0, 5)
-      .map(([id, count]) => ({ id, count }));
-    const topCategories  = [...categoryMap.entries()]
-      .sort((a, b) => b[1] - a[1]).slice(0, 5)
-      .map(([cat, count]) => ({ cat, count }));
-
-    res.json({
-      success: true,
-      stats: {
-        totalStudents, totalLessons, todayLessons,
-        topStudent: topStudent
-          ? { name: topStudent.name, totalLessons: topStudent.totalLessons }
-          : null,
-        last7Days, topInstructors, topCategories
-      }
-    });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
-
-app.get('/api/bot/match/:discord', requireApiKey, async (req, res) => {
-  if (!mongoConnected) return res.status(503).json({ success: false, error: 'MongoDB bağlı değil' });
-  try {
-    const s = await BotStudent.findOne({
-      $or: [
-        { discordId: req.params.discord },
-        { name: { $regex: req.params.discord, $options: 'i' } }
+ { $regex: req.params.discord, $options: 'i' } }
       ]
     });
     if (!s) return res.json({ success: false, error: 'Bulunamadı' });
@@ -1197,6 +1103,202 @@ app.post('/api/discord/sync-existing', requireApiKey, async (req, res) => {
     }
     res.json({ success: true, message: `${added} ogrenci kuyruga eklendi`, total: existing.rows.length });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ─── BOT DB (Aynı PostgreSQL, bot tabloları) ─────────────────────────────────
+// Bot ve veri sunucusu aynı DATABASE_URL'yi kullanır.
+// Bot tabloları: bot_students, lessons, bot_coaches, voice_sessions, auto_register_queue, bot_heartbeat
+
+const botPool = new Pool({
+  connectionString: process.env.BOT_DATABASE_URL || process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
+
+// GET /api/bot/students — tüm öğrenciler
+app.get('/api/bot/students', requireApiKey, async (req, res) => {
+  try {
+    const result = await botPool.query(`
+      SELECT
+        id, "discordId", "discordUsername", name, surname,
+        rank, "targetRank", "packageType", "isActive",
+        "totalLessons", "remainingLessons", "registeredAt", "updatedAt"
+      FROM bot_students
+      ORDER BY "totalLessons" DESC
+    `);
+    const students = result.rows.map(s => ({
+      ...s,
+      lastLessonDate: s.updatedAt ? s.updatedAt.toISOString().split('T')[0] : null,
+      createdAt: s.registeredAt,
+    }));
+    res.json({ success: true, students });
+  } catch (e) {
+    console.error('[BOT] /api/bot/students hata:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// GET /api/bot/students/:discordId — tek öğrenci + dersleri
+app.get('/api/bot/students/:discordId', requireApiKey, async (req, res) => {
+  try {
+    const { rows: sRows } = await botPool.query(
+      `SELECT * FROM bot_students WHERE "discordId" = $1`,
+      [req.params.discordId]
+    );
+    if (!sRows.length) return res.status(404).json({ success: false, error: 'Ogrenci bulunamadi' });
+    const student = sRows[0];
+
+    const { rows: lessons } = await botPool.query(
+      `SELECT "lessonNumber", "coachId", "coachUsername", category, "channelName",
+              "startedAt", "endedAt", "durationMins", notes
+       FROM lessons
+       WHERE "studentId" = $1
+       ORDER BY "startedAt" DESC
+       LIMIT 20`,
+      [student.id]
+    );
+
+    const mapped = lessons.map(l => ({
+      lessonNumber:  l.lessonNumber,
+      date:          l.startedAt ? l.startedAt.toISOString().split('T')[0] : null,
+      category:      l.category,
+      instructorId:  l.coachId,
+      coachUsername: l.coachUsername,
+      timestamp:     l.startedAt,
+      durationMins:  l.durationMins,
+    }));
+
+    res.json({ success: true, student: { ...student, lastLessonDate: student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null }, lessons: mapped });
+  } catch (e) {
+    console.error('[BOT] /api/bot/students/:id hata:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// GET /api/bot/lessons — tüm dersler (sayfalı)
+app.get('/api/bot/lessons', requireApiKey, async (req, res) => {
+  try {
+    const page  = parseInt(req.query.page)  || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = (page - 1) * limit;
+
+    const { rows: countRows } = await botPool.query('SELECT COUNT(*) FROM lessons');
+    const total = parseInt(countRows[0].count);
+
+    const { rows } = await botPool.query(
+      `SELECT l."lessonNumber", l."coachId", l."coachUsername", l.category,
+              l."startedAt", l."durationMins",
+              s.name || ' ' || s.surname AS "studentName"
+       FROM lessons l
+       LEFT JOIN bot_students s ON s.id = l."studentId"
+       ORDER BY l."startedAt" DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const lessons = rows.map(l => ({
+      lessonNumber:  l.lessonNumber,
+      studentName:   l.studentName || '-',
+      date:          l.startedAt ? l.startedAt.toISOString().split('T')[0] : null,
+      category:      l.category,
+      instructorId:  l.coachId,
+      coachUsername: l.coachUsername,
+      timestamp:     l.startedAt,
+      durationMins:  l.durationMins,
+    }));
+
+    res.json({ success: true, lessons, total, page, totalPages: Math.ceil(total / limit) });
+  } catch (e) {
+    console.error('[BOT] /api/bot/lessons hata:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// GET /api/bot/stats — istatistikler
+app.get('/api/bot/stats', requireApiKey, async (req, res) => {
+  try {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000);
+
+    const [totalStudents, totalLessons, todayLessons, topStudent, recentLessons] = await Promise.all([
+      botPool.query('SELECT COUNT(*) FROM bot_students'),
+      botPool.query('SELECT COUNT(*) FROM lessons'),
+      botPool.query('SELECT COUNT(*) FROM lessons WHERE "startedAt" >= $1', [today]),
+      botPool.query('SELECT name, surname, "totalLessons" FROM bot_students ORDER BY "totalLessons" DESC LIMIT 1'),
+      botPool.query('SELECT "startedAt", "coachId", category FROM lessons WHERE "startedAt" >= $1', [sevenDaysAgo]),
+    ]);
+
+    const dates = [];
+    for (let i = 6; i >= 0; i--) {
+      dates.push(new Date(Date.now() - i * 86400000).toISOString().split('T')[0]);
+    }
+
+    const last7Map      = new Map(dates.map(d => [d, 0]));
+    const instructorMap = new Map();
+    const categoryMap   = new Map();
+
+    for (const l of recentLessons.rows) {
+      const d = l.startedAt.toISOString().split('T')[0];
+      if (last7Map.has(d)) last7Map.set(d, last7Map.get(d) + 1);
+      instructorMap.set(l.coachId, (instructorMap.get(l.coachId) || 0) + 1);
+      if (l.category) categoryMap.set(l.category, (categoryMap.get(l.category) || 0) + 1);
+    }
+
+    const ts = topStudent.rows[0];
+    res.json({
+      success: true,
+      stats: {
+        totalStudents:  parseInt(totalStudents.rows[0].count),
+        totalLessons:   parseInt(totalLessons.rows[0].count),
+        todayLessons:   parseInt(todayLessons.rows[0].count),
+        topStudent:     ts ? { name: `${ts.name} ${ts.surname}`, totalLessons: ts.totalLessons } : null,
+        last7Days:      dates.map(d => ({ date: d, count: last7Map.get(d) || 0 })),
+        topInstructors: [...instructorMap.entries()].sort((a,b) => b[1]-a[1]).slice(0,5).map(([id,count]) => ({ id, count })),
+        topCategories:  [...categoryMap.entries()].sort((a,b) => b[1]-a[1]).slice(0,5).map(([cat,count]) => ({ cat, count })),
+      },
+    });
+  } catch (e) {
+    console.error('[BOT] /api/bot/stats hata:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// GET /api/bot/match/:discord — discordId veya isimle ara
+app.get('/api/bot/match/:discord', requireApiKey, async (req, res) => {
+  try {
+    const term = req.params.discord;
+    const { rows: sRows } = await botPool.query(
+      `SELECT * FROM bot_students
+       WHERE "discordId" = $1
+          OR LOWER("discordUsername") LIKE LOWER($2)
+          OR LOWER(name) LIKE LOWER($2)
+       LIMIT 1`,
+      [term, `%${term}%`]
+    );
+    if (!sRows.length) return res.json({ success: false, error: 'Bulunamadi' });
+    const student = sRows[0];
+
+    const { rows: lessons } = await botPool.query(
+      `SELECT "lessonNumber", "coachId", "coachUsername", category, "startedAt", "durationMins"
+       FROM lessons WHERE "studentId" = $1
+       ORDER BY "startedAt" DESC LIMIT 20`,
+      [student.id]
+    );
+
+    const mapped = lessons.map(l => ({
+      lessonNumber:  l.lessonNumber,
+      date:          l.startedAt ? l.startedAt.toISOString().split('T')[0] : null,
+      category:      l.category,
+      instructorId:  l.coachId,
+      coachUsername: l.coachUsername,
+      timestamp:     l.startedAt,
+      durationMins:  l.durationMins,
+    }));
+
+    res.json({ success: true, student: { ...student, lastLessonDate: student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null }, lessons: mapped });
+  } catch (e) {
+    console.error('[BOT] /api/bot/match hata:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // ─── SUNUCU BAŞLAT ────────────────────────────────────────────────────────────
