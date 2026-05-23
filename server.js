@@ -821,17 +821,7 @@ app.delete('/api/lesson-types/:id', requireApiKey, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
- { $regex: req.params.discord, $options: 'i' } }
-      ]
-    });
-    if (!s) return res.json({ success: false, error: 'Bulunamadı' });
-    const l = await BotLesson
-      .find({ studentId: s.discordId })
-      .sort({ timestamp: -1 })
-      .limit(20);
-    res.json({ success: true, student: s, lessons: l });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
+
 
 // ─── GENEL ────────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
