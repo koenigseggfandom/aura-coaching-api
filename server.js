@@ -1344,26 +1344,26 @@ async function runBackup() {
   const timestamp = new Date().toISOString().split('T')[0];
 
   try {
-    const [students, applications, coaches, coachApps, botStudents, lessons] = await Promise.all([
+    const [students, applications, coaches, coachApps, botStudents, lessons, lessonTypes] = await Promise.all([
       pool.query('SELECT * FROM students ORDER BY created_at DESC').catch(() => ({ rows: [] })),
       pool.query('SELECT * FROM applications ORDER BY created_at DESC').catch(() => ({ rows: [] })),
       pool.query('SELECT * FROM coaches ORDER BY created_at DESC').catch(() => ({ rows: [] })),
       pool.query('SELECT * FROM coach_applications ORDER BY created_at DESC').catch(() => ({ rows: [] })),
       botPool.query('SELECT * FROM bot_students ORDER BY "registeredAt" DESC').catch(() => ({ rows: [] })),
       botPool.query('SELECT * FROM lessons ORDER BY "startedAt" DESC').catch(() => ({ rows: [] })),
+      pool.query('SELECT * FROM lesson_types').catch(() => ({ rows: [] })),
     ]);
 
-    await Promise.all([
-      saveToGithub('students',          `${timestamp}.json`, { backup_date: timestamp, count: students.rows.length,     data: students.rows }),
-      saveToGithub('applications',      `${timestamp}.json`, { backup_date: timestamp, count: applications.rows.length, data: applications.rows }),
-      saveToGithub('coaches',           `${timestamp}.json`, { backup_date: timestamp, count: coaches.rows.length,      data: coaches.rows }),
-      saveToGithub('coach_applications',`${timestamp}.json`, { backup_date: timestamp, count: coachApps.rows.length,    data: coachApps.rows }),
-      saveToGithub('bot_students',      `${timestamp}.json`, { backup_date: timestamp, count: botStudents.rows.length,  data: botStudents.rows }),
-      saveToGithub('lessons',           `${timestamp}.json`, { backup_date: timestamp, count: lessons.rows.length,      data: lessons.rows }),
-    ]);
+    await saveToGithub('students',          `${timestamp}.json`, { backup_date: timestamp, count: students.rows.length,     data: students.rows });
+    await saveToGithub('applications',      `${timestamp}.json`, { backup_date: timestamp, count: applications.rows.length, data: applications.rows });
+    await saveToGithub('coaches',           `${timestamp}.json`, { backup_date: timestamp, count: coaches.rows.length,      data: coaches.rows });
+    await saveToGithub('coach_applications',`${timestamp}.json`, { backup_date: timestamp, count: coachApps.rows.length,    data: coachApps.rows });
+    await saveToGithub('bot_students',      `${timestamp}.json`, { backup_date: timestamp, count: botStudents.rows.length,  data: botStudents.rows });
+    await saveToGithub('lessons',           `${timestamp}.json`, { backup_date: timestamp, count: lessons.rows.length,      data: lessons.rows });
+    await saveToGithub('lesson_types',      `${timestamp}.json`, { backup_date: timestamp, count: lessonTypes.rows.length,  data: lessonTypes.rows });
 
     console.log('[BACKUP] Tamamlandı!');
-    return { success: true, timestamp, tables: ['students', 'applications', 'coaches', 'coach_applications', 'bot_students', 'lessons'] };
+    return { success: true, timestamp, tables: ['students', 'applications', 'coaches', 'coach_applications', 'bot_students', 'lessons', 'lesson_types'] };
   } catch (e) {
     console.error('[BACKUP] Genel hata:', e.message);
     return { success: false, error: e.message };
