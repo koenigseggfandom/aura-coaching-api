@@ -1310,11 +1310,10 @@ async function githubRequest(method, path, body) {
   return res.json();
 }
 
-async function saveToGithub(filename, data) {
+async function saveToGithub(folder, filename, data) {
   const content = Buffer.from(JSON.stringify(data, null, 2)).toString('base64');
-  const path = `/contents/backups/${filename}`;
+  const path = `/contents/backups/${folder}/${filename}`;
 
-  // Dosya var mı kontrol et (SHA gerekli güncelleme için)
   let sha;
   try {
     const existing = await githubRequest('GET', path);
@@ -1322,23 +1321,23 @@ async function saveToGithub(filename, data) {
   } catch {}
 
   const result = await githubRequest('PUT', path, {
-    message: `backup: ${filename} — ${new Date().toISOString()}`,
+    message: `backup: ${folder}/${filename} — ${new Date().toISOString()}`,
     content,
     branch: GITHUB_BRANCH,
     ...(sha ? { sha } : {}),
   });
 
   if (result.content) {
-    console.log(`[BACKUP] ${filename} kaydedildi`);
+    console.log(`[BACKUP] ${folder}/${filename} kaydedildi`);
   } else {
-    console.error(`[BACKUP] ${filename} hatası:`, result.message);
+    console.error(`[BACKUP] ${folder}/${filename} hatası:`, result.message);
   }
 }
 
 async function runBackup() {
   if (!GITHUB_TOKEN || !GITHUB_REPO) {
     console.warn('[BACKUP] GITHUB_TOKEN veya GITHUB_REPO eksik, backup atlanıyor');
-    return;
+    return { success: false, error: 'GITHUB_TOKEN veya GITHUB_REPO eksik' };
   }
 
   console.log('[BACKUP] Başlıyor...');
@@ -1355,24 +1354,33 @@ async function runBackup() {
     ]);
 
     await Promise.all([
-      saveToGithub(`${timestamp}_students.json`,          { backup_date: timestamp, count: students.rows.length,     data: students.rows }),
-      saveToGithub(`${timestamp}_applications.json`,      { backup_date: timestamp, count: applications.rows.length, data: applications.rows }),
-      saveToGithub(`${timestamp}_coaches.json`,           { backup_date: timestamp, count: coaches.rows.length,      data: coaches.rows }),
-      saveToGithub(`${timestamp}_coach_applications.json`,{ backup_date: timestamp, count: coachApps.rows.length,    data: coachApps.rows }),
-      saveToGithub(`${timestamp}_bot_students.json`,      { backup_date: timestamp, count: botStudents.rows.length,  data: botStudents.rows }),
-      saveToGithub(`${timestamp}_lessons.json`,           { backup_date: timestamp, count: lessons.rows.length,      data: lessons.rows }),
+      saveToGithub('students',          `${timestamp}.json`, { backup_date: timestamp, count: students.rows.length,     data: students.rows }),
+      saveToGithub('applications',      `${timestamp}.json`, { backup_date: timestamp, count: applications.rows.length, data: applications.rows }),
+      saveToGithub('coaches',           `${timestamp}.json`, { backup_date: timestamp, count: coaches.rows.length,      data: coaches.rows }),
+      saveToGithub('coach_applications',`${timestamp}.json`, { backup_date: timestamp, count: coachApps.rows.length,    data: coachApps.rows }),
+      saveToGithub('bot_students',      `${timestamp}.json`, { backup_date: timestamp, count: botStudents.rows.length,  data: botStudents.rows }),
+      saveToGithub('lessons',           `${timestamp}.json`, { backup_date: timestamp, count: lessons.rows.length,      data: lessons.rows }),
     ]);
 
     console.log('[BACKUP] Tamamlandı!');
+    return { success: true, timestamp, tables: ['students', 'applications', 'coaches', 'coach_applications', 'bot_students', 'lessons'] };
   } catch (e) {
     console.error('[BACKUP] Genel hata:', e.message);
+    return { success: false, error: e.message };
   }
 }
+
+// Manuel backup endpoint
+app.post('/api/backup/run', requireApiKey, async (req, res) => {
+  console.log('[BACKUP] Manuel backup tetiklendi');
+  const result = await runBackup();
+  res.json(result);
+});
 
 // Her gece 00:00'da çalış
 cron.schedule('0 0 * * *', () => {
   console.log('[BACKUP] Günlük backup başlıyor...');
-  setTimeout(() => runBackup(), 3000);
+  runBackup();
 }, { timezone: 'Europe/Istanbul' });
 
 // ─── SUNUCU BAŞLAT ────────────────────────────────────────────────────────────
