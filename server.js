@@ -608,8 +608,8 @@ app.post('/api/students', requireApiKey, async (req, res) => {
       const isDiscordId = discord && /^\d{15,20}$/.test(discord.trim());
       await pool.query(
         `INSERT INTO auto_register_queue
-           (name, surname, "discordTag", "discordId", "packageType", rank, "targetRank", processed)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,false)`,
+           (id, name, surname, "discordTag", "discordId", "packageType", rank, "targetRank", processed, "createdAt")
+         VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,false,NOW())`,
         [
           name, surname,
           isDiscordId ? null : (discord || null),
@@ -1372,7 +1372,7 @@ async function runBackup() {
 // Her gece 00:00'da çalış
 cron.schedule('0 0 * * *', () => {
   console.log('[BACKUP] Günlük backup başlıyor...');
-  runBackup();
+  setTimeout(() => runBackup(), 3000);
 }, { timezone: 'Europe/Istanbul' });
 
 // ─── SUNUCU BAŞLAT ────────────────────────────────────────────────────────────
@@ -1380,6 +1380,6 @@ app.listen(PORT, async () => {
   await initDatabase();
   await connectMongo();
   console.log(`🚀 AURA Coaching API çalışıyor! Port: ${PORT}`);
-  // Sunucu başlayınca bir kere backup al
-  runBackup();
+  // Sunucu tamamen hazır olduktan sonra backup al
+  setTimeout(() => runBackup(), 3000);
 });
