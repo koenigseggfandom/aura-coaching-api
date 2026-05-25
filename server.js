@@ -1291,6 +1291,89 @@ app.get('/api/bot/match/:discord', requireApiKey, async (req, res) => {
   }
 });
 
+
+// POST /api/bot/students/:discordId/ders-ekle — admin panelden ders ekle
+app.post('/api/bot/students/:discordId/ders-ekle', requireApiKey, async (req, res) => {
+  try {
+    const { category, coachId, coachUsername, durationMins, notes, lessonDate, forceAdd } = req.body;
+    if (!category) return res.status(400).json({ success: false, error: 'category zorunlu' });
+
+    const { rows: sRows } = await botPool.query(
+      `SELECT * FROM bot_students WHERE "discordId" = $1`,
+      [req.params.discordId]
+    );
+    if (!sRows.length) return res.status(404).json({ success: false, error: 'Ogrenci bulunamadi' });
+    const student = sRows[0];
+
+    // Duplikat kontrolu: son 5 dakika icinde ayni ogrenci icin zaten ders var mi?
+    // forceAdd=true ile gonderilirse bu kontrol atlanir
+    if (!forceAdd) {
+      const { rows: recentRows } = await botPool.query(
+        `SELECT id FROM lessons
+         WHERE "studentId" = $1
+           AND "isAutomatic" = false
+           AND "createdAt" > NOW() - INTERVAL '5 minutes'
+         LIMIT 1`,
+        [student.id]
+      );
+      if (recentRows.length) {
+        return res.status(409).json({
+          success: false,
+          duplicate: true,
+          error: 'Son 5 dakika icinde bu ogrenci icin zaten manuel ders eklendi. Cift kayit onlemek icin istek reddedildi. Zorla eklemek icin forceAdd: true gonderin.',
+        });
+      }
+    }
+
+    const { rows: countRows } = await botPool.query(
+      `SELECT COUNT(*) FROM lessons WHERE "studentId" = $1`, [student.id]
+    );
+    const lessonNumber = parseInt(countRows[0].count) + 1;
+    const startedAt    = lessonDate ? new Date(lessonDate) : new Date();
+
+    const { rows: lessonRows } = await botPool.query(
+      `INSERT INTO lessons ("lessonNumber","studentId","coachId","coachUsername",category,"startedAt","endedAt","durationMins",notes,"isAutomatic","createdAt")
+       VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,false,NOW()) RETURNING *`,
+      [lessonNumber, student.id, coachId || 'admin', coachUsername || 'Admin', category, startedAt, durationMins || null, notes || null]
+    );
+
+    const { rows: updRows } = await botPool.query(
+      `UPDATE bot_students
+       SET "totalLessons"="totalLessons"+1, "remainingLessons"=GREATEST(0,"remainingLessons"-1), "updatedAt"=NOW()
+       WHERE id=$1 RETURNING *`,
+      [student.id]
+    );
+    const updated = updRows[0];
+
+    let autoDeactivated = false;
+    if (updated.remainingLessons <= 0 && updated.isActive) {
+      await botPool.query(`UPDATE bot_students SET "isActive"=false, "updatedAt"=NOW() WHERE id=$1`, [student.id]);
+      autoDeactivated = true;
+    }
+
+    console.log(`[BOT] Manuel ders eklendi: ${student.name} | ${category} | #${lessonNumber} | Kalan: ${updated.remainingLessons}`);
+    res.json({ success: true, lesson: lessonRows[0], student: updated, autoDeactivated });
+  } catch (e) {
+    console.error('[BOT] ders-ekle hata:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// POST /api/bot/students/:discordId/pasife-al — ogrenciyi pasife al
+app.post('/api/bot/students/:discordId/pasife-al', requireApiKey, async (req, res) => {
+  try {
+    const { rows } = await botPool.query(
+      `UPDATE bot_students SET "isActive"=false, "updatedAt"=NOW() WHERE "discordId"=$1 RETURNING *`,
+      [req.params.discordId]
+    );
+    if (!rows.length) return res.status(404).json({ success: false, error: 'Ogrenci bulunamadi' });
+    res.json({ success: true, student: rows[0] });
+  } catch (e) {
+    console.error('[BOT] pasife-al hata:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ─── GITHUB BACKUP ────────────────────────────────────────────────────────────
 const GITHUB_TOKEN  = process.env.GITHUB_TOKEN  || '';
 const GITHUB_REPO   = process.env.GITHUB_REPO   || '';
