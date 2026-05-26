@@ -1157,7 +1157,16 @@ app.get('/api/bot/students/:discordId', requireApiKey, async (req, res) => {
       durationMins:  l.durationMins,
     }));
 
-    res.json({ success: true, student: { ...student, lastLessonDate: student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null }, lessons: mapped });
+    const { rows: cntRows } = await botPool.query(
+      `SELECT COUNT(*) as cnt FROM lessons WHERE "studentId" = $1`, [student.id]
+    );
+    const gercekYapilan = parseInt(cntRows[0].cnt) || 0;
+    let paket = student.totalLessons || 0;
+    if (student.packageType) { const m = String(student.packageType).match(/[0-9]+/); if (m) paket = parseInt(m[0]); }
+    if (paket <= 0) paket = gercekYapilan;
+    const gercekKalan = Math.max(0, paket - gercekYapilan);
+
+    res.json({ success: true, student: { ...student, remainingLessons: gercekKalan, totalLessons: gercekYapilan, lastLessonDate: student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null }, lessons: mapped });
   } catch (e) {
     console.error('[BOT] /api/bot/students/:id hata:', e.message);
     res.status(500).json({ success: false, error: e.message });
@@ -1284,7 +1293,46 @@ app.get('/api/bot/match/:discord', requireApiKey, async (req, res) => {
       durationMins:  l.durationMins,
     }));
 
-    res.json({ success: true, student: { ...student, lastLessonDate: student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null }, lessons: mapped });
+    // Gerçek yapılan ders sayısını doğrudan lessons tablosundan say
+    const { rows: countRows } = await botPool.query(
+      `SELECT COUNT(*) as cnt FROM lessons WHERE "studentId" = $1`,
+      [student.id]
+    );
+    const gercekYapilan = parseInt(countRows[0].cnt) || 0;
+
+    // packageType'tan paket büyüklüğünü çıkart (örn "16 Ders" → 16)
+    // Yoksa totalLessons kullan (kayıt sırasında set edilmişse)
+    let paketBuyuklugu = student.totalLessons || 0;
+    if (student.packageType) {
+      const m = student.packageType.match(/\d+/);
+      if (m) paketBuyuklugu = parseInt(m[0]);
+    }
+    // Eğer paket hiç set edilmemişse gerçek yapılan + kalan (ama kalan -1 ise 0 say)
+    if (paketBuyuklugu <= 0) paketBuyuklugu = gercekYapilan;
+
+    // Gerçek kalan = paket - yapılan
+    const gercekKalan = Math.max(0, paketBuyuklugu - gercekYapilan);
+
+    // Eğer DB'deki remainingLessons yanlışsa (negatif veya çok farklıysa) düzelt
+    const dbKalan = student.remainingLessons || 0;
+    if (dbKalan < 0 || Math.abs(dbKalan - gercekKalan) > 1) {
+      // Arka planda DB'yi düzelt (fire & forget)
+      botPool.query(
+        `UPDATE bot_students SET "remainingLessons" = $1, "totalLessons" = $2, "updatedAt" = NOW() WHERE id = $3`,
+        [gercekKalan, gercekYapilan, student.id]
+      ).catch(e => console.error('[BOT] remainingLessons düzeltme hatası:', e.message));
+      console.log(`[BOT] ${student.name} remainingLessons düzeltildi: ${dbKalan} → ${gercekKalan} (paket: ${paketBuyuklugu}, yapılan: ${gercekYapilan})`);
+    }
+
+    const correctedStudent = {
+      ...student,
+      remainingLessons: gercekKalan,
+      totalLessons:     gercekYapilan,
+      packageType:      student.packageType || (paketBuyuklugu > 0 ? paketBuyuklugu + ' Ders' : null),
+      lastLessonDate:   student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null,
+    };
+
+    res.json({ success: true, student: correctedStudent, lessons: mapped });
   } catch (e) {
     console.error('[BOT] /api/bot/match hata:', e.message);
     res.status(500).json({ success: false, error: e.message });
@@ -1339,7 +1387,7 @@ app.post('/api/bot/students/:discordId/ders-ekle', requireApiKey, async (req, re
 
     const { rows: updRows } = await botPool.query(
       `UPDATE bot_students
-       SET "totalLessons"="totalLessons"+1, "remainingLessons"=GREATEST(0,"remainingLessons"-1), "updatedAt"=NOW()
+       SET "remainingLessons"=GREATEST(0,"remainingLessons"-1), "updatedAt"=NOW()
        WHERE id=$1 RETURNING *`,
       [student.id]
     );
