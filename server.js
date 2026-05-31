@@ -1166,7 +1166,7 @@ app.get('/api/bot/students/:discordId', requireApiKey, async (req, res) => {
     if (paket <= 0) paket = gercekYapilan;
     const gercekKalan = Math.max(0, paket - gercekYapilan);
 
-    res.json({ success: true, student: { ...student, remainingLessons: gercekKalan, totalLessons: gercekYapilan, lastLessonDate: student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null }, lessons: mapped });
+    res.json({ success: true, student: { ...student, remainingLessons: gercekKalan, totalLessons: paket, completedLessons: gercekYapilan, lastLessonDate: student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null }, lessons: mapped });
   } catch (e) {
     console.error('[BOT] /api/bot/students/:id hata:', e.message);
     res.status(500).json({ success: false, error: e.message });
@@ -1313,23 +1313,23 @@ app.get('/api/bot/match/:discord', requireApiKey, async (req, res) => {
     // Gerçek kalan = paket - yapılan
     const gercekKalan = Math.max(0, paketBuyuklugu - gercekYapilan);
 
-    // Eğer DB'deki remainingLessons yanlışsa (negatif veya çok farklıysa) düzelt
+    // DB'deki remainingLessons yanlışsa düzelt (totalLessons = PAKET büyüklüğü, sabit kalmalı)
     const dbKalan = student.remainingLessons || 0;
     if (dbKalan < 0 || Math.abs(dbKalan - gercekKalan) > 1) {
-      // Arka planda DB'yi düzelt (fire & forget)
       botPool.query(
-        `UPDATE bot_students SET "remainingLessons" = $1, "totalLessons" = $2, "updatedAt" = NOW() WHERE id = $3`,
-        [gercekKalan, gercekYapilan, student.id]
+        `UPDATE bot_students SET "remainingLessons" = $1, "updatedAt" = NOW() WHERE id = $2`,
+        [gercekKalan, student.id]  // totalLessons'a DOKUNMA — paket büyüklüğü orası
       ).catch(e => console.error('[BOT] remainingLessons düzeltme hatası:', e.message));
       console.log(`[BOT] ${student.name} remainingLessons düzeltildi: ${dbKalan} → ${gercekKalan} (paket: ${paketBuyuklugu}, yapılan: ${gercekYapilan})`);
     }
 
     const correctedStudent = {
       ...student,
-      remainingLessons: gercekKalan,
-      totalLessons:     gercekYapilan,
-      packageType:      student.packageType || (paketBuyuklugu > 0 ? paketBuyuklugu + ' Ders' : null),
-      lastLessonDate:   student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null,
+      remainingLessons:  gercekKalan,
+      totalLessons:      paketBuyuklugu,    // PAKET büyüklüğü (sabit)
+      completedLessons:  gercekYapilan,     // gerçek yapılan ders sayısı
+      packageType:       student.packageType || (paketBuyuklugu > 0 ? paketBuyuklugu + ' Ders' : null),
+      lastLessonDate:    student.updatedAt ? student.updatedAt.toISOString().split('T')[0] : null,
     };
 
     res.json({ success: true, student: correctedStudent, lessons: mapped });
