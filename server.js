@@ -63,7 +63,7 @@ app.options('*', cors(corsOptions));
 
 // ─── RATE LIMITER (saf JS, bağımlılık gerekmez) ───────────────────────────────
 const rateMap = new Map(); // ip → { count, resetAt }
-const RATE_LIMIT      = 60;   // istek başına pencere
+const RATE_LIMIT      = 300;  // admin paneli ayni anda cok istek atiyor, 300'e cikarildi
 const RATE_WINDOW_MS  = 60 * 1000; // 1 dakika
 
 function rateLimiter(req, res, next) {
