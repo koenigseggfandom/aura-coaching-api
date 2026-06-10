@@ -709,20 +709,39 @@ app.put('/api/students/:id', requireApiKey, async (req, res) => {
 
 app.put('/api/students/:id/toggle-active', requireApiKey, async (req, res) => {
   try {
-    const { isActive, totalLessons, weeklyLessons } = req.body;
+    const { isActive, totalLessons, weeklyLessons, skipLessonCheck } = req.body;
     let r;
 
-    if (isActive && totalLessons !== undefined) {
-      r = await pool.query(
-        `UPDATE students
-         SET is_active=true,
-             total_lessons=$1, remaining_lessons=$1,
-             weekly_lessons=$2,
-             archived=false, archived_at=NULL
-         WHERE id=$3 RETURNING *`,
-        [parseInt(totalLessons), parseInt(weeklyLessons) || 1, req.params.id]
-      );
+    if (isActive === true) {
+      if (totalLessons !== undefined) {
+        // Yeni ders paketi ile aktifleştir
+        r = await pool.query(
+          `UPDATE students
+           SET is_active=true,
+               total_lessons=$1, remaining_lessons=$1,
+               weekly_lessons=$2,
+               archived=false, archived_at=NULL
+           WHERE id=$3 RETURNING *`,
+          [parseInt(totalLessons), parseInt(weeklyLessons) || 1, req.params.id]
+        );
+      } else {
+        // Kalan ders var mı kontrol et
+        const check = await pool.query(`SELECT remaining_lessons, total_lessons FROM students WHERE id=$1`, [req.params.id]);
+        if (!check.rows.length) return res.status(404).json({ success: false, error: 'Öğrenci bulunamadı' });
+        const kalan = check.rows[0].remaining_lessons || 0;
+        if (kalan > 0 || skipLessonCheck) {
+          // Kalan dersi varsa veya skipLessonCheck=true ise direkt aktifleştir
+          r = await pool.query(
+            `UPDATE students SET is_active=true, archived=false, archived_at=NULL WHERE id=$1 RETURNING *`,
+            [req.params.id]
+          );
+        } else {
+          // Ders 0 — frontend ders sayısı girmeyi göstermeli
+          return res.json({ success: false, needsLessonCount: true, error: 'Öğrencinin kalan dersi yok, yeni paket girmelisiniz.' });
+        }
+      }
     } else {
+      // Pasife alma
       r = await pool.query(
         `UPDATE students SET is_active=$1 WHERE id=$2 RETURNING *`,
         [Boolean(isActive), req.params.id]
@@ -1353,22 +1372,25 @@ app.post('/api/bot/students/:discordId/ders-ekle', requireApiKey, async (req, re
     if (!sRows.length) return res.status(404).json({ success: false, error: 'Ogrenci bulunamadi' });
     const student = sRows[0];
 
-    // Duplikat kontrolu: son 5 dakika icinde ayni ogrenci icin zaten ders var mi?
+    // Duplikat kontrolu: ayni ogrenci, ayni kategori, son 60 saniye icinde ders eklendiyse engelle
     // forceAdd=true ile gonderilirse bu kontrol atlanir
     if (!forceAdd) {
+      const checkDate = lessonDate ? new Date(lessonDate) : new Date();
       const { rows: recentRows } = await botPool.query(
         `SELECT id FROM lessons
          WHERE "studentId" = $1
            AND "isAutomatic" = false
-           AND "createdAt" > NOW() - INTERVAL '5 minutes'
+           AND category = $2
+           AND DATE("startedAt") = DATE($3::timestamptz)
+           AND "createdAt" > NOW() - INTERVAL '60 seconds'
          LIMIT 1`,
-        [student.id]
+        [student.id, category, checkDate.toISOString()]
       );
       if (recentRows.length) {
         return res.status(409).json({
           success: false,
           duplicate: true,
-          error: 'Son 5 dakika icinde bu ogrenci icin zaten manuel ders eklendi. Cift kayit onlemek icin istek reddedildi. Zorla eklemek icin forceAdd: true gonderin.',
+          error: 'Son 60 saniye icinde bu ogrenci icin ayni kategoride ders eklendi. Zorla eklemek icin forceAdd: true gonderin.',
         });
       }
     }
@@ -1407,15 +1429,30 @@ app.post('/api/bot/students/:discordId/ders-ekle', requireApiKey, async (req, re
   }
 });
 
-// POST /api/bot/students/:discordId/pasife-al — ogrenciyi pasife al
+// POST /api/bot/students/:discordId/pasife-al — ogrenciyi pasife al + Discord rolunu kaldir
 app.post('/api/bot/students/:discordId/pasife-al', requireApiKey, async (req, res) => {
   try {
+    const discordId = req.params.discordId;
     const { rows } = await botPool.query(
       `UPDATE bot_students SET "isActive"=false, "updatedAt"=NOW() WHERE "discordId"=$1 RETURNING *`,
-      [req.params.discordId]
+      [discordId]
     );
     if (!rows.length) return res.status(404).json({ success: false, error: 'Ogrenci bulunamadi' });
-    res.json({ success: true, student: rows[0] });
+
+    // Discord ogrenci rolunu kaldir
+    const studentRoleId = process.env.STUDENT_ROLE_ID;
+    let roleRemoved = false;
+    if (studentRoleId && DISCORD_GUILD_ID && DISCORD_BOT_TOKEN) {
+      try {
+        await discordRequest('DELETE', `/guilds/${DISCORD_GUILD_ID}/members/${discordId}/roles/${studentRoleId}`);
+        roleRemoved = true;
+        console.log(`[PASIFE-AL] ${discordId} Discord ogrenci rolu kaldirildi`);
+      } catch (e) {
+        console.warn(`[PASIFE-AL] Rol kaldirma basarisiz (${discordId}):`, e.message);
+      }
+    }
+
+    res.json({ success: true, student: rows[0], roleRemoved });
   } catch (e) {
     console.error('[BOT] pasife-al hata:', e.message);
     res.status(500).json({ success: false, error: e.message });
